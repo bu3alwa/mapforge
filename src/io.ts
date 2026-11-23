@@ -4,6 +4,7 @@ import { renderRegion } from './render';
 
 interface Snapshot {
   terrain: Uint8Array;
+  elevation: Int8Array;
   objects: MapObject[];
   nextId: number;
 }
@@ -14,10 +15,11 @@ export class History {
   constructor(private limit = 60) {}
 
   private snap(map: MapData): Snapshot {
-    return { terrain: map.terrain.slice(), objects: structuredClone(map.objects), nextId: map.nextId };
+    return { terrain: map.terrain.slice(), elevation: map.elevation.slice(), objects: structuredClone(map.objects), nextId: map.nextId };
   }
   private apply(map: MapData, s: Snapshot) {
     map.terrain.set(s.terrain);
+    map.elevation.set(s.elevation);
     map.objects = s.objects;
     map.nextId = s.nextId;
   }
@@ -62,11 +64,12 @@ function fromBase64(b64: string): Uint8Array {
 export function serialize(map: MapData): string {
   return JSON.stringify({
     format: 'mapforge',
-    version: 1,
+    version: 2,
     name: map.name,
     width: map.width,
     height: map.height,
     terrain: toBase64(map.terrain),
+    elevation: toBase64(new Uint8Array(map.elevation.buffer, map.elevation.byteOffset, map.elevation.length)),
     objects: map.objects,
     nextId: map.nextId,
   });
@@ -79,6 +82,10 @@ export function deserialize(json: string): MapData {
   const t = fromBase64(d.terrain);
   if (t.length !== map.terrain.length) throw new Error('Map data is corrupted');
   map.terrain.set(t);
+  if (d.elevation) {
+    const e = fromBase64(d.elevation);
+    if (e.length === map.elevation.length) map.elevation.set(new Int8Array(e.buffer, e.byteOffset, e.length));
+  }
   map.objects = d.objects ?? [];
   map.nextId = d.nextId ?? map.objects.reduce((m: number, o: MapObject) => Math.max(m, o.id + 1), 1);
   map.name = d.name ?? 'Untitled map';

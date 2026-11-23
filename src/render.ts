@@ -1,5 +1,5 @@
 // Renders map regions (terrain, walls, objects) into canvases, with a chunk cache for the editor view.
-import { DRAW_ORDER, MapData, T, TERRAIN, objectBounds } from './map';
+import { DRAW_ORDER, MapData, MapObject, T, TERRAIN, objectBounds } from './map';
 import { terrainPattern } from './patterns';
 import { drawObject } from './objects';
 import { hash2 } from './rng';
@@ -22,20 +22,24 @@ const CASES: number[][] = [
  * outside the window, which is far enough out to be clipped away.
  */
 function organicPath(map: MapData, k: T, gx0: number, gy0: number, gx1: number, gy1: number): Path2D {
-  const W = gx1 - gx0 + 2, H = gy1 - gy0 + 2;
-  const s = new Uint8Array(W * H);
   const ok = ORDER[k];
   const at = (x: number, y: number) => map.terrain[Math.min(map.height - 1, Math.max(0, y)) * map.width + Math.min(map.width - 1, Math.max(0, x))] as T;
-  for (let sy = 1; sy < H - 1; sy++)
-    for (let sx = 1; sx < W - 1; sx++) {
-      const x = gx0 + sx - 1, y = gy0 + sy - 1;
-      const t = at(x, y);
-      let v = t === k ? 1 : 0;
-      if (!v && t !== T.Void && ORDER[t] > ok) {
-        for (let dy = -1; dy <= 1 && !v; dy++) for (let dx = -1; dx <= 1; dx++) if (at(x + dx, y + dy) === k) { v = 1; break; }
-      }
-      s[sy * W + sx] = v;
+  return contourPath((x, y) => {
+    const t = at(x, y);
+    if (t === k) return true;
+    if (t !== T.Void && ORDER[t] > ok) {
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (at(x + dx, y + dy) === k) return true;
     }
+    return false;
+  }, gx0, gy0, gx1, gy1, 0.2);
+}
+
+/** Smoothed outline of the tiles where `inside` is true, over the window [gx0,gx1)x[gy0,gy1). */
+export function contourPath(inside: (x: number, y: number) => boolean, gx0: number, gy0: number, gx1: number, gy1: number, wobble: number): Path2D {
+  const W = gx1 - gx0 + 2, H = gy1 - gy0 + 2;
+  const s = new Uint8Array(W * H);
+  for (let sy = 1; sy < H - 1; sy++)
+    for (let sx = 1; sx < W - 1; sx++) s[sy * W + sx] = inside(gx0 + sx - 1, gy0 + sy - 1) ? 1 : 0;
 
   // Points are edge midpoints; keys use doubled world coordinates so they are integers.
   const adj = new Map<number, number[]>();
@@ -66,7 +70,7 @@ function organicPath(map: MapData, k: T, gx0: number, gy0: number, gx1: number, 
       seen.add(cur);
       const kx = Math.floor(cur / 131072) - 64, ky = (cur % 131072) - 64;
       // Gentle deterministic wobble so edges look hand-drawn.
-      pts.push(kx / 2 + (hash2(kx, ky, 71) - 0.5) * 0.2, ky / 2 + (hash2(kx, ky, 72) - 0.5) * 0.2);
+      pts.push(kx / 2 + (hash2(kx, ky, 71) - 0.5) * wobble, ky / 2 + (hash2(kx, ky, 72) - 0.5) * wobble);
       const n = adj.get(cur)!;
       const next = n[0] !== prev ? n[0] : n[1];
       prev = cur;
@@ -188,6 +192,8 @@ export function renderRegion(
   ctx.lineWidth = 0.18;
   ctx.stroke(walls);
 
+  renderElevation(ctx, map, x0, y0, x1, y1, scale);
+
   if (objects) {
     const pad = 2.5;
     const list = map.objects
@@ -195,13 +201,85 @@ export function renderRegion(
         const b = objectBounds(o);
         return b.x < x1 + pad && b.x + b.w > x0 - pad && b.y < y1 + pad && b.y + b.h > y0 - pad;
       });
-    // Paint order: ground clutter, then furniture, buildings, trees, labels on top.
-    const layer = (type: string) =>
-      type === 'label' ? 5 : type === 'tree' || type === 'pine' || type === 'deadtree' ? 4 : type === 'house' || type === 'tower' ? 3 : type === 'torch' || type === 'campfire' ? 2 : 1;
-    list.sort((a, b) => layer(a.type) - layer(b.type) || a.y - b.y);
+    list.sort(compareObjects);
     for (const o of list) drawObject(ctx, o);
   }
   ctx.restore();
+}
+
+/** Default paint order by type: floor coverings, clutter, furniture, buildings, trees, labels. */
+export function defaultLayer(type: string): number {
+  if (type === 'label') return 6;
+  if (type === 'tree' || type === 'pine' || type === 'deadtree' || type === 'palm') return 5;
+  if (type === 'house' || type === 'tower') return 4;
+  if (type === 'torch' || type === 'campfire' || type === 'lantern') return 3;
+  if (type === 'rug' || type === 'trap' || type === 'lilypad' || type === 'campfire_unlit') return 0;
+  return 1;
+}
+
+export function compareObjects(a: MapObject, b: MapObject): number {
+  return (a.z ?? 0) - (b.z ?? 0) || defaultLayer(a.type) - defaultLayer(b.type) || a.y - b.y || a.id - b.id;
+}
+
+/**
+ * Raised ground casts a soft shadow down-right onto lower ground, with a dark edge and a lit rim.
+ * Pits (below 0) are darkened.
+ */
+function renderElevation(ctx: CanvasRenderingContext2D, map: MapData, x0: number, y0: number, x1: number, y1: number, scale: number) {
+  const m = 5;
+  const ex0 = Math.max(0, x0 - m), ey0 = Math.max(0, y0 - m), ex1 = Math.min(map.width, x1 + m), ey1 = Math.min(map.height, y1 + m);
+  let minE = 0, maxE = 0;
+  for (let y = ey0; y < ey1; y++)
+    for (let x = ex0; x < ex1; x++) {
+      const e = map.elevation[y * map.width + x];
+      if (e < minE) minE = e;
+      if (e > maxE) maxE = e;
+    }
+  if (minE === maxE) return;
+  const W = x1 - x0, H = y1 - y0;
+  for (let L = minE + 1; L <= maxE; L++) {
+    const high = contourPath((x, y) => map.getElev(x, y) >= L, x0 - 4, y0 - 4, x1 + 4, y1 + 4, 0.08);
+    const outside = new Path2D();
+    outside.rect(x0 - 6, y0 - 6, W + 12, H + 12);
+    outside.addPath(high);
+
+    // Shadow falling onto the lower side: draw the shape far away so only its blurred, offset shadow lands here.
+    ctx.save();
+    ctx.clip(outside, 'evenodd');
+    const far = 2000;
+    ctx.shadowColor = 'rgba(0,0,0,0.55)';
+    ctx.shadowBlur = 0.35 * scale;
+    ctx.shadowOffsetX = (-far + 0.32) * scale;
+    ctx.shadowOffsetY = 0.42 * scale;
+    ctx.translate(far, 0);
+    ctx.fillStyle = '#000';
+    ctx.fill(high, 'evenodd');
+    ctx.restore();
+
+    if (L <= 0) {
+      // Below-ground side of this step is a pit: darken it.
+      ctx.save();
+      ctx.clip(outside, 'evenodd');
+      ctx.fillStyle = 'rgba(0,0,0,0.16)';
+      ctx.fillRect(x0 - 6, y0 - 6, W + 12, H + 12);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = 'rgba(255,240,210,0.05)';
+      ctx.fill(high, 'evenodd');
+    }
+    // Lit top rim, then the dark cliff edge.
+    ctx.save();
+    ctx.clip(high, 'evenodd');
+    ctx.translate(0.07, 0.07);
+    ctx.strokeStyle = 'rgba(255,245,225,0.32)';
+    ctx.lineWidth = 0.1;
+    ctx.stroke(high);
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(22,16,10,0.85)';
+    ctx.lineWidth = 0.1;
+    ctx.lineJoin = 'round';
+    ctx.stroke(high);
+  }
 }
 
 export const CHUNK = 16;

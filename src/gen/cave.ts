@@ -12,6 +12,7 @@ export const caveGenerator: Generator = {
     { key: 'pools', label: 'Pools', type: 'select', default: 'water', options: [
       { value: 'none', label: 'None' }, { value: 'water', label: 'Water' }, { value: 'lava', label: 'Lava' },
     ] },
+    { key: 'ledges', label: 'Ledges & drops (height)', type: 'bool', default: true },
     { key: 'features', label: 'Stalagmites & crystals', type: 'bool', default: true },
   ],
   run(ctx, p) {
@@ -84,6 +85,7 @@ export const caveGenerator: Generator = {
 
     const pools = String(p.pools);
     const pn = valueNoise(rng);
+    const ln = valueNoise(rng);
     for (let y = 0; y < h; y++)
       for (let x = 0; x < w; x++) {
         const open = best[y * w + x] === 0;
@@ -93,6 +95,11 @@ export const caveGenerator: Generator = {
           if (v > 0.66) t = pools === 'lava' ? T.Lava : v > 0.72 ? T.DeepWater : T.Water;
         }
         map.set(r.x + x, r.y + y, t);
+        if (open && p.ledges) {
+          const lv = fbm(ln, x / 16 + 5, y / 16, 3);
+          const e = lv > 0.62 ? 2 : lv > 0.5 ? 1 : 0;
+          map.setElev(r.x + x, r.y + y, t === T.Water || t === T.DeepWater || t === T.Lava ? Math.min(e, 0) - 1 : e);
+        }
       }
 
     if (p.features) {

@@ -38,6 +38,8 @@ export const volcanoGenerator: Generator = {
         else if (elev[i] > mq) t = T.Mountain;
         else if (elev[i] < 0.3) t = T.Dirt;
         map.set(r.x + x, r.y + y, t);
+        // Rock ridges stand up out of the plain; lava flows sit in channels below it.
+        map.setElev(r.x + x, r.y + y, t === T.Lava ? -1 : t === T.Mountain ? (elev[i] > mq + 0.06 ? 2 : 1) : 0);
       }
     for (let y = 0; y < h; y++)
       for (let x = 0; x < w; x++) {

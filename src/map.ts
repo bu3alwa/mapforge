@@ -71,7 +71,12 @@ export interface MapObject {
   rot: number; // radians
   color?: string;
   text?: string;
+  /** Layer offset: higher draws on top. Objects with equal z use a default order by type. */
+  z?: number;
 }
+
+export const MIN_ELEV = -2;
+export const MAX_ELEV = 4;
 
 export interface Rect {
   x: number;
@@ -84,6 +89,8 @@ export class MapData {
   width: number;
   height: number;
   terrain: Uint8Array;
+  /** Height level per tile (MIN_ELEV..MAX_ELEV, 0 = ground). Higher areas cast shadows. */
+  elevation: Int8Array;
   objects: MapObject[] = [];
   nextId = 1;
   name = 'Untitled map';
@@ -92,6 +99,16 @@ export class MapData {
     this.width = width;
     this.height = height;
     this.terrain = new Uint8Array(width * height).fill(fill);
+    this.elevation = new Int8Array(width * height);
+  }
+
+  getElev(x: number, y: number): number {
+    x = Math.min(this.width - 1, Math.max(0, x));
+    y = Math.min(this.height - 1, Math.max(0, y));
+    return this.elevation[y * this.width + x];
+  }
+  setElev(x: number, y: number, e: number): void {
+    if (this.inBounds(x, y)) this.elevation[y * this.width + x] = Math.max(MIN_ELEV, Math.min(MAX_ELEV, Math.round(e)));
   }
 
   inBounds(x: number, y: number): boolean {

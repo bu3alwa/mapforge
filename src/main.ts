@@ -1,14 +1,14 @@
 import './style.css';
-import { MapData, MapObject, PALETTE_ORDER, Rect, T, TERRAIN, clampRect, objectBounds } from './map';
-import { CHUNK, ChunkCache } from './render';
-import { OBJECT_BY_TYPE, OBJECT_DEFS, ObjectDef, drawObject, labelWidth } from './objects';
+import { MAX_ELEV, MIN_ELEV, MapData, MapObject, PALETTE_ORDER, Rect, T, TERRAIN, clampRect, objectBounds } from './map';
+import { CHUNK, ChunkCache, compareObjects } from './render';
+import { OBJECT_BY_TYPE, OBJECT_CATEGORIES, OBJECT_DEFS, ObjectDef, drawObject, labelWidth } from './objects';
 import { textureCanvas } from './patterns';
 import { GENERATORS, Generator, Params } from './gen';
 import { Rng } from './rng';
 import { History, autosave, deserialize, downloadBlob, exportPng, loadAutosave, safeName, serialize } from './io';
 
 // ---------- State ----------
-type ToolId = 'select' | 'paint' | 'rect' | 'fill' | 'stamp' | 'scatter' | 'erase' | 'label' | 'area' | 'pan';
+type ToolId = 'select' | 'paint' | 'rect' | 'fill' | 'height' | 'stamp' | 'scatter' | 'erase' | 'label' | 'area' | 'pan';
 
 let map: MapData = loadAutosave() ?? createStarterMap();
 const cache = new ChunkCache(map);
@@ -18,6 +18,7 @@ const state = {
   tool: 'paint' as ToolId,
   terrain: T.Stone as T,
   brush: 1,
+  height: 1,
   objType: 'tree',
   objColor: null as string | null,
   stampRot: 0,
@@ -141,7 +142,26 @@ function draw() {
   // Overlays in world units.
   ctx.setTransform(Z, 0, 0, Z, OX, OY);
   const px = 1 / Z;
+  if (state.tool === 'height' && view.zoom >= 10) drawHeightNumbers(px, W, H, Z, OX, OY);
   drawOverlays(px);
+}
+
+/** While using the height brush, show each tile's level. */
+function drawHeightNumbers(px: number, W: number, H: number, Z: number, OX: number, OY: number) {
+  const gx0 = Math.max(0, Math.floor(-OX / Z)), gx1 = Math.min(map.width, Math.ceil((W - OX) / Z));
+  const gy0 = Math.max(0, Math.floor(-OY / Z)), gy1 = Math.min(map.height, Math.ceil((H - OY) / Z));
+  ctx.font = `600 ${Math.min(0.45, 13 * px)}px system-ui`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let y = gy0; y < gy1; y++)
+    for (let x = gx0; x < gx1; x++) {
+      const e = map.elevation[y * map.width + x];
+      if (!e) continue;
+      ctx.fillStyle = e > 0 ? 'rgba(255,230,150,0.85)' : 'rgba(150,200,255,0.85)';
+      ctx.fillText(e > 0 ? `+${e}` : String(e), x + 0.5, y + 0.5);
+    }
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
 }
 
 function dashedRect(r: Rect, px: number, color: string, fill?: string) {
@@ -173,7 +193,7 @@ function drawOverlays(px: number) {
   const hv = state.hover;
   if (!hv || drag?.kind === 'pan') return;
   const tool = state.tool;
-  if (tool === 'paint' || tool === 'erase' || tool === 'scatter') {
+  if (tool === 'paint' || tool === 'erase' || tool === 'scatter' || tool === 'height') {
     const c = brushCenter(hv.x, hv.y);
     ctx.beginPath();
     ctx.arc(c.x, c.y, Math.max(0.5, state.brush / 2), 0, Math.PI * 2);
@@ -247,6 +267,18 @@ function paintAt(x: number, y: number, t: T, bounds: Rect | null): Rect | null {
   const nb = { x: Math.floor(c.x - r), y: Math.floor(c.y - r), w: Math.ceil(r * 2) + 1, h: Math.ceil(r * 2) + 1 };
   changed(nb);
   return bounds ? union(bounds, nb) : nb;
+}
+
+function heightAt(x: number, y: number, level: number) {
+  const c = brushCenter(x, y);
+  const r = Math.max(0.5, state.brush / 2);
+  let any = false;
+  for (let ty = Math.floor(c.y - r); ty <= Math.ceil(c.y + r); ty++)
+    for (let tx = Math.floor(c.x - r); tx <= Math.ceil(c.x + r); tx++) {
+      if (!map.inBounds(tx, ty) || Math.hypot(tx + 0.5 - c.x, ty + 0.5 - c.y) > r + 0.001) continue;
+      if (map.getElev(tx, ty) !== level) { map.setElev(tx, ty, level); any = true; }
+    }
+  if (any) changed({ x: Math.floor(c.x - r), y: Math.floor(c.y - r), w: Math.ceil(r * 2) + 1, h: Math.ceil(r * 2) + 1 }, 6);
 }
 
 function union(a: Rect, b: Rect): Rect {
@@ -353,6 +385,7 @@ type Drag =
   | { kind: 'pan'; sx: number; sy: number; ox: number; oy: number }
   | { kind: 'paint'; last: { x: number; y: number } }
   | { kind: 'erase'; last: { x: number; y: number } }
+  | { kind: 'height'; last: { x: number; y: number } }
   | { kind: 'scatter'; last: { x: number; y: number } }
   | { kind: 'rect' | 'area'; start: { x: number; y: number }; cur: { x: number; y: number } }
   | { kind: 'move'; obj: MapObject; start: { x: number; y: number }; orig: { x: number; y: number }; pushed: boolean };
@@ -380,6 +413,11 @@ canvas.addEventListener('pointerdown', (e) => {
       history.push(map);
       eraseObjectsAt(w.x, w.y);
       drag = { kind: 'erase', last: w };
+      break;
+    case 'height':
+      history.push(map);
+      heightAt(w.x, w.y, state.height);
+      drag = { kind: 'height', last: w };
       break;
     case 'scatter':
       history.push(map);
@@ -432,6 +470,7 @@ canvas.addEventListener('pointermove', (e) => {
         break;
       case 'paint':
       case 'erase':
+      case 'height':
       case 'scatter': {
         const last = drag.last;
         const dist = Math.hypot(w.x - last.x, w.y - last.y);
@@ -442,6 +481,7 @@ canvas.addEventListener('pointermove', (e) => {
           const x = last.x + ((w.x - last.x) * i) / n, y = last.y + ((w.y - last.y) * i) / n;
           if (drag.kind === 'paint') paintAt(x, y, state.terrain, null);
           else if (drag.kind === 'erase') eraseObjectsAt(x, y);
+          else if (drag.kind === 'height') heightAt(x, y, state.height);
           else scatterAt(x, y);
         }
         drag.last = w;
@@ -507,7 +547,7 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ---------- Keyboard ----------
-const TOOL_KEYS: Record<string, ToolId> = { v: 'select', b: 'paint', m: 'rect', g: 'fill', o: 'stamp', s: 'scatter', x: 'erase', t: 'label', a: 'area', h: 'pan' };
+const TOOL_KEYS: Record<string, ToolId> = { v: 'select', b: 'paint', m: 'rect', g: 'fill', e: 'height', o: 'stamp', s: 'scatter', x: 'erase', t: 'label', a: 'area', h: 'pan' };
 
 window.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement;
@@ -517,6 +557,13 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); saveFile(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'd' && state.selected) { e.preventDefault(); duplicateSelected(); return; }
+  if ((e.ctrlKey || e.metaKey) && (e.code === 'BracketRight' || e.code === 'BracketLeft') && state.selected) {
+    e.preventDefault();
+    const up = e.code === 'BracketRight';
+    reorderSelected(e.shiftKey ? (up ? 'front' : 'back') : up ? 'forward' : 'backward');
+    return;
+  }
+  if (state.tool === 'height' && !e.ctrlKey && !e.metaKey && /^[0-4]$/.test(e.key)) { setHeight(Number(e.key) * (e.shiftKey ? -1 : 1)); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === ' ') { spaceDown = true; canvas.style.cursor = 'grab'; e.preventDefault(); return; }
   if (e.key === 'Escape') { select(null); state.area = null; refreshGenTarget(); renderToolOptions(); requestRender(); return; }
@@ -548,6 +595,40 @@ window.addEventListener('keyup', (e) => {
 function undo() { if (history.undo(map)) { select(null); changed(); toast('Undo'); } }
 function redo() { if (history.redo(map)) { select(null); changed(); toast('Redo'); } }
 
+/**
+ * Move the selected object up or down the draw order among the objects it overlaps.
+ * Uses the object's z value; objects with equal z fall back to the default order by type.
+ */
+function reorderSelected(dir: 'forward' | 'backward' | 'front' | 'back') {
+  const o = state.selected;
+  if (!o) return;
+  const b = objectBounds(o);
+  const overlapping = map.objects.filter((x) => {
+    if (x === o) return false;
+    const c = objectBounds(x);
+    return c.x < b.x + b.w && c.x + c.w > b.x && c.y < b.y + b.h && c.y + c.h > b.y;
+  });
+  const stack = [...overlapping, o].sort(compareObjects);
+  const i = stack.indexOf(o);
+  let z: number;
+  if (dir === 'front' || dir === 'forward') {
+    const above = stack[i + 1];
+    if (!above) { toast(overlapping.length ? 'Already on top' : 'Nothing overlaps this object'); return; }
+    const target = dir === 'front' ? stack[stack.length - 1] : above;
+    z = (target.z ?? 0) + (compareObjects({ ...o, z: target.z }, target) > 0 ? 0 : 1);
+  } else {
+    const below = stack[i - 1];
+    if (!below) { toast(overlapping.length ? 'Already at the bottom' : 'Nothing overlaps this object'); return; }
+    const target = dir === 'back' ? stack[0] : below;
+    z = (target.z ?? 0) - (compareObjects({ ...o, z: target.z }, target) < 0 ? 0 : 1);
+  }
+  history.push(map);
+  o.z = z;
+  changed(b);
+  refreshSelectionPanel(true);
+  toast(dir === 'front' ? 'Brought to front' : dir === 'back' ? 'Sent to back' : dir === 'forward' ? 'Moved forward' : 'Moved backward');
+}
+
 function duplicateSelected() {
   const o = state.selected;
   if (!o) return;
@@ -566,6 +647,7 @@ const ICONS: Record<ToolId, string> = {
   stamp: '<path d="M12 3c3.3 0 6 2.4 6 5.6 0 3-2.4 5.4-6 5.4s-6-2.4-6-5.4C6 5.4 8.7 3 12 3z"/><path d="M12 14v7M9 21h6"/>',
   scatter: '<circle cx="7" cy="7" r="2.2"/><circle cx="16" cy="6" r="1.6"/><circle cx="12" cy="13" r="2.6"/><circle cx="6" cy="17" r="1.6"/><circle cx="18" cy="16" r="2.2"/>',
   erase: '<path d="M4 16l9-9 6 6-6 6H8z"/><path d="M9 11l6 6M13 21h8"/>',
+  height: '<path d="M3 20h18"/><path d="M5 20v-6h5v-5h5v-5h4v16"/>',
   label: '<path d="M5 7V5h14v2M12 5v14M9 19h6"/>',
   area: '<path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><path d="M10 4h4M10 20h4M4 10v4M20 10v4" stroke-dasharray="2 2"/>',
   pan: '<path d="M8 13V6a1.5 1.5 0 0 1 3 0v5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V6a1.5 1.5 0 0 1 3 0v8c0 4-2.7 7-6.2 7-2.4 0-3.6-1-5-3.4L4 14.2a1.5 1.5 0 0 1 2.5-1.6L8 14"/>',
@@ -575,6 +657,7 @@ const TOOLS: { id: ToolId; name: string; key: string }[] = [
   { id: 'paint', name: 'Terrain brush', key: 'B' },
   { id: 'rect', name: 'Room / rectangle', key: 'M' },
   { id: 'fill', name: 'Fill', key: 'G' },
+  { id: 'height', name: 'Height brush (raise / lower ground)', key: 'E' },
   { id: 'stamp', name: 'Place object', key: 'O' },
   { id: 'scatter', name: 'Scatter brush', key: 'S' },
   { id: 'erase', name: 'Erase objects', key: 'X' },
@@ -610,6 +693,12 @@ function setTool(t: ToolId) {
   switchTab('draw');
   renderToolOptions();
   renderObjectPalette();
+  requestRender();
+}
+
+function setHeight(level: number) {
+  state.height = Math.max(MIN_ELEV, Math.min(MAX_ELEV, level));
+  renderToolOptions();
   requestRender();
 }
 
@@ -670,6 +759,29 @@ function renderToolOptions() {
     case 'fill':
       form.append(hint(`Click to flood-fill a connected area with <b>${TERRAIN[state.terrain].name}</b>.`));
       break;
+    case 'height': {
+      const levels = document.createElement('div');
+      levels.className = 'field';
+      levels.innerHTML = '<span>Paint height level</span>';
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.gap = '4px';
+      for (let l = MIN_ELEV; l <= MAX_ELEV; l++) {
+        const b = document.createElement('button');
+        b.textContent = l > 0 ? `+${l}` : String(l);
+        b.className = 'grow' + (l === state.height ? ' primary' : '');
+        b.title = l === 0 ? 'Ground level' : l > 0 ? `Raised ${l * 5} ft` : `Sunken ${-l * 5} ft`;
+        b.onclick = () => setHeight(l);
+        row.append(b);
+      }
+      levels.append(row);
+      form.append(
+        levels,
+        brushSlider(),
+        hint('Paint raised platforms, cliffs and hills, or sunken pits. Higher ground casts a shadow onto lower ground. Keys <kbd>0</kbd>–<kbd>4</kbd> pick a level, <kbd>Shift</kbd>+number for pits. Paint level 0 to flatten.'),
+      );
+      break;
+    }
     case 'stamp': {
       const def = OBJECT_BY_TYPE.get(state.objType)!;
       form.append(hint(`Click to place <b>${def.name}</b>. <kbd>R</kbd> rotates.`));
@@ -785,8 +897,7 @@ function objectIcon(def: ObjectDef): string {
 function renderObjectPalette() {
   const el = $('objectPalette');
   el.innerHTML = '';
-  const cats = ['Nature', 'Dungeon', 'Furniture', 'Town'] as const;
-  for (const cat of cats) {
+  for (const cat of OBJECT_CATEGORIES) {
     const defs = OBJECT_DEFS.filter((d) => d.category === cat && (state.tool !== 'scatter' || d.natural));
     if (!defs.length) continue;
     const h = document.createElement('h4');
@@ -823,12 +934,12 @@ function select(o: MapObject | null) {
   requestRender();
 }
 
-function refreshSelectionPanel() {
+function refreshSelectionPanel(force = false) {
   const el = $('selectionPanel');
   const o = state.selected;
   if (!o) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
-  if (el.dataset.id === String(o.id) && el.childElementCount) {
+  if (!force && el.dataset.id === String(o.id) && el.childElementCount) {
     // Update numbers in place while dragging.
     return;
   }
@@ -886,7 +997,27 @@ function refreshSelectionPanel() {
   del.style.color = 'var(--danger)';
   del.onclick = () => { history.push(map); removeObject(o); select(null); };
   actions.append(rot, dup, del);
-  form.append(actions);
+  const layers = document.createElement('div');
+  layers.className = 'field';
+  layers.innerHTML = '<span>Layer order</span>';
+  const lrow = document.createElement('div');
+  lrow.className = 'row gap';
+  const mk = (label: string, title: string, dir: 'front' | 'forward' | 'backward' | 'back') => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.title = title;
+    b.className = 'grow';
+    b.onclick = () => reorderSelected(dir);
+    return b;
+  };
+  lrow.append(
+    mk('⤒', 'Bring to front (Ctrl+Shift+])', 'front'),
+    mk('↑ Forward', 'Bring forward (Ctrl+])', 'forward'),
+    mk('↓ Back', 'Send backward (Ctrl+[)', 'backward'),
+    mk('⤓', 'Send to back (Ctrl+Shift+[)', 'back'),
+  );
+  layers.append(lrow);
+  form.append(actions, layers);
 }
 
 // ---------- Generate tab ----------
@@ -943,6 +1074,7 @@ function runGenerator() {
   history.push(map);
   select(null);
   map.removeObjectsIn(region);
+  for (let y = region.y; y < region.y + region.h; y++) for (let x = region.x; x < region.x + region.w; x++) map.setElev(x, y, 0);
   const t0 = performance.now();
   g.run({ map, region, rng: new Rng(`${state.seed}:${g.id}`) }, state.genParams[g.id]);
   changed();
@@ -1012,15 +1144,25 @@ function loadMap(m: MapData) {
 // New map dialog.
 const dlgNew = $<HTMLDialogElement>('dlgNew');
 const newPreset = $<HTMLSelectElement>('newPreset');
-newPreset.addEventListener('change', () => ($('newCustom').hidden = newPreset.value !== 'custom'));
-$('btnNew').onclick = () => dlgNew.showModal();
+const newW = $<HTMLInputElement>('newW'), newH = $<HTMLInputElement>('newH');
+function syncPresetToFields() {
+  if (newPreset.value === 'custom') return;
+  const [w, h] = newPreset.value.split('x');
+  newW.value = w;
+  newH.value = h;
+}
+newPreset.addEventListener('change', syncPresetToFields);
+// Typing a size switches the preset to "Custom" unless it matches one exactly.
+const syncFieldsToPreset = () => {
+  const match = [...newPreset.options].find((o) => o.value === `${newW.value}x${newH.value}`);
+  newPreset.value = match ? match.value : 'custom';
+};
+newW.addEventListener('input', syncFieldsToPreset);
+newH.addEventListener('input', syncFieldsToPreset);
+$('btnNew').onclick = () => { syncPresetToFields(); dlgNew.showModal(); };
 dlgNew.addEventListener('close', () => {
   if (dlgNew.returnValue !== 'ok') return;
-  let w: number, h: number;
-  if (newPreset.value === 'custom') {
-    w = Number(($('newW') as HTMLInputElement).value);
-    h = Number(($('newH') as HTMLInputElement).value);
-  } else [w, h] = newPreset.value.split('x').map(Number);
+  let w = Number(newW.value), h = Number(newH.value);
   w = Math.max(8, Math.min(400, Math.round(w || 60)));
   h = Math.max(8, Math.min(400, Math.round(h || 45)));
   const m = new MapData(w, h, Number(($('newFill') as HTMLSelectElement).value) as T);

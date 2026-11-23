@@ -14,11 +14,12 @@ export const forestGenerator: Generator = {
     { key: 'path', label: 'Trail', type: 'bool', default: true },
     { key: 'stream', label: 'Stream', type: 'bool', default: true },
     { key: 'camp', label: 'Campsite clearing', type: 'bool', default: true },
+    { key: 'hills', label: 'Hills & ridges (height)', type: 'bool', default: false },
   ],
   run(ctx, p) {
     const { map, region: r, rng } = ctx;
     const w = r.w, h = r.h;
-    const n = valueNoise(rng), n2 = valueNoise(rng);
+    const n = valueNoise(rng), n2 = valueNoise(rng), hn = valueNoise(rng);
     const vals = new Float32Array(w * h);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) vals[y * w + x] = fbm(n, x / 11, y / 11, 4);
     const q = quantile(vals, 1 - Number(p.density));
@@ -27,6 +28,10 @@ export const forestGenerator: Generator = {
       for (let x = 0; x < w; x++) {
         const v = vals[y * w + x];
         map.set(r.x + x, r.y + y, v > q ? T.Forest : fbm(n2, x / 6, y / 6, 2) < 0.32 ? T.Dirt : T.Grass);
+        if (p.hills) {
+          const hv = fbm(hn, x / 18 + 11, y / 18, 3);
+          map.setElev(r.x + x, r.y + y, hv > 0.66 ? 2 : hv > 0.54 ? 1 : 0);
+        }
       }
 
     // Campsite clearing.
@@ -48,7 +53,9 @@ export const forestGenerator: Generator = {
       const pts = wobblyLine(rng, a[0], a[1], b[0], b[1], 0.25);
       const width = rng.range(2.2, 3.4);
       stampLine(pts, width + 1.6, (x, y) => { if (inRegion(r, x, y) && map.get(x, y) !== T.Water) map.set(x, y, rng.chance(0.5) ? T.Sand : T.Dirt); });
-      stampLine(pts, width, (x, y) => { if (inRegion(r, x, y)) map.set(x, y, T.Water); });
+      // The stream cuts down to ground level, sitting one step lower.
+      stampLine(pts, width + 1.6, (x, y) => { if (inRegion(r, x, y)) map.setElev(x, y, 0); });
+      stampLine(pts, width, (x, y) => { if (inRegion(r, x, y)) { map.set(x, y, T.Water); map.setElev(x, y, -1); } });
     }
     // Trail, with a bridge where it crosses water.
     if (p.path) {
@@ -59,6 +66,7 @@ export const forestGenerator: Generator = {
         if (!inRegion(r, x, y)) return;
         const t = map.get(x, y);
         map.set(x, y, t === T.Water || t === T.DeepWater ? T.Wood : T.Dirt);
+        if (t === T.Water || t === T.DeepWater) map.setElev(x, y, 0);
       });
     }
 
