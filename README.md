@@ -17,6 +17,14 @@ npm run build
 
 This outputs a static site to `dist/`, which can be hosted anywhere that serves static files.
 
+## Deploy
+
+```
+npm run deploy
+```
+
+Builds the site and publishes it to the `gh-pages` branch, which GitHub Pages serves at https://bu3alwa.github.io/mapforge/.
+
 ## Code layout
 
 - `src/main.ts`: editor UI, tools and input
