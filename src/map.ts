@@ -144,9 +144,10 @@ export class MapData {
 
 /** Axis-aligned bounds of an object, accounting for 90° rotations. */
 export function objectBounds(o: MapObject): Rect {
-  const rotated = Math.abs(Math.sin(o.rot)) > 0.5;
-  const w = rotated ? o.h : o.w;
-  const h = rotated ? o.w : o.h;
+  // Axis-aligned box around the rotated object (exact for quarter turns, also covers free rotation).
+  const c = Math.abs(Math.cos(o.rot)), s = Math.abs(Math.sin(o.rot));
+  const w = o.w * c + o.h * s;
+  const h = o.w * s + o.h * c;
   return { x: o.x - w / 2, y: o.y - h / 2, w, h };
 }
 

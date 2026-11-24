@@ -28,6 +28,7 @@ const state = {
   labelSize: 1.5,
   labelColor: '#f4ead2',
   grid: true,
+  snap: (() => { try { return localStorage.getItem('mapforge.snap') !== '0'; } catch { return true; } })(),
   selected: null as MapObject | null,
   area: null as Rect | null,
   hover: null as { x: number; y: number } | null,
@@ -329,8 +330,18 @@ function floodFill(x: number, y: number, t: T) {
   changed({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 });
 }
 
+function snapHint() {
+  return state.snap
+    ? 'Snapping to the grid: hold <kbd>Shift</kbd> for free placement, or press <kbd>N</kbd> to turn snapping off.'
+    : 'Free placement (snap is off, <kbd>N</kbd> turns it on). <kbd>R</kbd> turns 15° at a time; hold <kbd>Shift</kbd> to snap.';
+}
+
+/** Objects snap to the grid when "Snap" is on; holding Shift flips that for the current placement or move. */
+let shiftHeld = false;
+const snapping = () => state.snap !== shiftHeld;
+
 function snapCenter(def: ObjectDef | undefined, x: number, y: number, w: number, h: number, rot: number) {
-  if (!def?.snap) return { x, y };
+  if (!def?.snap || !snapping()) return { x, y };
   const rotated = Math.abs(Math.sin(rot)) > 0.5;
   const bw = rotated ? h : w, bh = rotated ? w : h;
   const sx = Number.isInteger(bw) ? Math.round(x - bw / 2) + bw / 2 : Math.floor(x) + 0.5;
@@ -519,7 +530,7 @@ canvas.addEventListener('pointermove', (e) => {
         const before = objectBounds(o);
         const def = OBJECT_BY_TYPE.get(o.type);
         const nx = drag.orig.x + (w.x - drag.start.x), ny = drag.orig.y + (w.y - drag.start.y);
-        const p = e.shiftKey ? { x: nx, y: ny } : snapCenter(def, nx, ny, o.w, o.h, o.rot);
+        const p = snapCenter(def, nx, ny, o.w, o.h, o.rot);
         o.x = p.x; o.y = p.y;
         changed(before);
         changed(objectBounds(o));
@@ -566,6 +577,18 @@ canvas.addEventListener('wheel', (e) => {
 // ---------- Keyboard ----------
 const TOOL_KEYS: Record<string, ToolId> = { v: 'select', b: 'paint', m: 'rect', g: 'fill', e: 'height', o: 'stamp', s: 'scatter', x: 'erase', t: 'label', a: 'area', h: 'pan' };
 
+// Track Shift so the stamp preview and drags switch between snapped and free placement live.
+const trackShift = (e: KeyboardEvent | PointerEvent) => {
+  if (e.shiftKey === shiftHeld) return;
+  shiftHeld = e.shiftKey;
+  if (state.tool === 'stamp') requestRender();
+};
+window.addEventListener('keydown', trackShift, true);
+window.addEventListener('keyup', trackShift, true);
+window.addEventListener('pointermove', trackShift, true);
+window.addEventListener('pointerdown', trackShift, true);
+window.addEventListener('blur', () => { shiftHeld = false; });
+
 window.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement;
   if (target.matches('input, select, textarea') || document.querySelector('dialog[open]')) return;
@@ -586,22 +609,29 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { select(null); state.area = null; refreshGenTarget(); renderToolOptions(); requestRender(); return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && state.selected) { history.push(map); removeObject(state.selected); select(null); return; }
   if (k === 'r') {
+    // Quarter turns while snapping; 15° steps when placing freely.
+    const step = snapping() ? Math.PI / 2 : Math.PI / 12;
+    const turn = (r: number) => {
+      const n = (r + step) % (Math.PI * 2);
+      return Math.abs(n - Math.round(n / step) * step) < 1e-6 ? Math.round(n / step) * step : n;
+    };
     if (state.tool === 'select' && state.selected) {
       history.push(map);
       const before = objectBounds(state.selected);
-      state.selected.rot = ((state.selected.rot + Math.PI / 2) % (Math.PI * 2));
+      state.selected.rot = turn(state.selected.rot);
       const p = snapCenter(OBJECT_BY_TYPE.get(state.selected.type), state.selected.x, state.selected.y, state.selected.w, state.selected.h, state.selected.rot);
       state.selected.x = p.x; state.selected.y = p.y;
       changed(before); changed(objectBounds(state.selected));
       refreshSelectionPanel();
     } else if (state.tool === 'stamp') {
-      state.stampRot = (state.stampRot + Math.PI / 2) % (Math.PI * 2);
+      state.stampRot = turn(state.stampRot);
       requestRender();
     }
     return;
   }
   if (e.key === '[' || e.key === ']') { setBrush(state.brush + (e.key === ']' ? 1 : -1)); return; }
   if (e.shiftKey && k === 'g') { toggleGrid(); return; }
+  if (k === 'n') { toggleSnap(); return; }
   if (k === 'f') { fitView(); return; }
   if (TOOL_KEYS[k]) setTool(TOOL_KEYS[k]);
 });
@@ -801,7 +831,7 @@ function renderToolOptions() {
     }
     case 'stamp': {
       const def = OBJECT_BY_TYPE.get(state.objType)!;
-      form.append(hint(`Click to place <b>${def.name}</b>. <kbd>R</kbd> rotates.`));
+      form.append(hint(`Click to place <b>${def.name}</b>. <kbd>R</kbd> rotates. ${snapHint()}`));
       if (def.colors) form.append(colorPicker(def.colors, state.objColor ?? def.colors[0], (c) => { state.objColor = c; requestRender(); }));
       break;
     }
@@ -823,7 +853,7 @@ function renderToolOptions() {
       );
       break;
     case 'select':
-      form.append(hint('Click an object to select it, then drag to move. <kbd>R</kbd> rotate · <kbd>Del</kbd> delete · <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate · hold <kbd>Shift</kbd> to move off-grid.'));
+      form.append(hint('Click an object to select it, then drag to move. <kbd>R</kbd> rotate · <kbd>Del</kbd> delete · <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate. ' + snapHint()));
       break;
     case 'area': {
       form.append(hint('Drag to select part of the map. Generators and export can then work on just that area.'));
@@ -1122,6 +1152,18 @@ function toggleGrid() {
   requestRender();
 }
 $('btnGrid').onclick = toggleGrid;
+
+// Snap objects to the grid (a per-browser preference, not part of the map).
+function toggleSnap() {
+  state.snap = !state.snap;
+  try { localStorage.setItem('mapforge.snap', state.snap ? '1' : '0'); } catch { /* storage blocked */ }
+  $('btnSnap').classList.toggle('on', state.snap);
+  toast(state.snap ? 'Objects snap to the grid' : 'Free placement: objects no longer snap');
+  renderToolOptions();
+  requestRender();
+}
+$('btnSnap').onclick = toggleSnap;
+$('btnSnap').classList.toggle('on', state.snap);
 
 // Grid type (squares or hexes) and hex size; saved with the map.
 const gridType = $<HTMLSelectElement>('gridType'), hexSize = $<HTMLSelectElement>('hexSize');
