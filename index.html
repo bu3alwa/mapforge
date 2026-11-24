@@ -20,6 +20,17 @@
           <button id="btnUndo" class="icon" title="Undo (Ctrl+Z)">↶</button>
           <button id="btnRedo" class="icon" title="Redo (Ctrl+Y)">↷</button>
           <button id="btnGrid" class="toggle on" title="Toggle grid (Shift+G)">Grid</button>
+          <select id="gridType" class="top-select" title="Grid type">
+            <option value="square">Squares</option>
+            <option value="hex-pointy">Hex (rows)</option>
+            <option value="hex-flat">Hex (columns)</option>
+          </select>
+          <select id="hexSize" class="top-select" title="Hex size (across the flat sides)" hidden>
+            <option value="1">5 ft hex</option>
+            <option value="2">10 ft hex</option>
+            <option value="3">15 ft hex</option>
+            <option value="6">30 ft hex</option>
+          </select>
           <button id="btnFit" title="Fit map to screen (F)">Fit</button>
           <span class="sep"></span>
           <button id="btnExport" class="primary" title="Export as image">Export PNG</button>

@@ -1,4 +1,5 @@
 // Map data model: a tile grid of terrain plus a list of placed objects.
+import type { GridSpec } from './grid';
 
 export enum T {
   Void = 0,
@@ -94,6 +95,8 @@ export class MapData {
   objects: MapObject[] = [];
   nextId = 1;
   name = 'Untitled map';
+  /** Grid overlay shown in the editor and drawn on exports. */
+  grid: GridSpec = { type: 'square', size: 1 };
 
   constructor(width: number, height: number, fill: T = T.Void) {
     this.width = width;

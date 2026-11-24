@@ -1,6 +1,7 @@
 // Save/load (JSON), autosave, undo history and PNG export.
 import { MapData, MapObject, Rect } from './map';
 import { renderRegion } from './render';
+import { addGridPath, GRID_TYPES, HEX_SIZES } from './grid';
 
 interface Snapshot {
   terrain: Uint8Array;
@@ -72,6 +73,7 @@ export function serialize(map: MapData): string {
     elevation: toBase64(new Uint8Array(map.elevation.buffer, map.elevation.byteOffset, map.elevation.length)),
     objects: map.objects,
     nextId: map.nextId,
+    grid: map.grid,
   });
 }
 
@@ -89,6 +91,7 @@ export function deserialize(json: string): MapData {
   map.objects = d.objects ?? [];
   map.nextId = d.nextId ?? map.objects.reduce((m: number, o: MapObject) => Math.max(m, o.id + 1), 1);
   map.name = d.name ?? 'Untitled map';
+  if (d.grid && GRID_TYPES.includes(d.grid.type)) map.grid = { type: d.grid.type, size: HEX_SIZES.includes(d.grid.size) ? d.grid.size : 1 };
   return map;
 }
 
@@ -136,12 +139,20 @@ export async function exportPng(map: MapData, area: Rect, pxPerTile: number, gri
       ctx.restore();
     }
   if (grid) {
-    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
-    ctx.lineWidth = Math.max(1, pxPerTile / 50);
+    // Grid lines are drawn in map coordinates so hexes line up with the editor even for a cropped area.
+    ctx.save();
+    ctx.setTransform(pxPerTile, 0, 0, pxPerTile, -area.x * pxPerTile, -area.y * pxPerTile);
     ctx.beginPath();
-    for (let i = 0; i <= area.w; i++) { ctx.moveTo(i * pxPerTile, 0); ctx.lineTo(i * pxPerTile, h); }
-    for (let j = 0; j <= area.h; j++) { ctx.moveTo(0, j * pxPerTile); ctx.lineTo(w, j * pxPerTile); }
+    ctx.rect(area.x, area.y, area.w, area.h);
+    ctx.clip();
+    const hex = map.grid.type !== 'square';
+    ctx.strokeStyle = hex ? 'rgba(0,0,0,0.38)' : 'rgba(0,0,0,0.22)';
+    ctx.lineWidth = Math.max(1, pxPerTile / (hex ? 35 : 50)) / pxPerTile;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    addGridPath(ctx, map.grid, area.x, area.y, area.x + area.w, area.y + area.h);
     ctx.stroke();
+    ctx.restore();
   }
   return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Export failed: image too large'))), 'image/png'));
 }

@@ -5,6 +5,7 @@ import { OBJECT_BY_TYPE, OBJECT_CATEGORIES, OBJECT_DEFS, ObjectDef, drawObject, 
 import { textureCanvas } from './patterns';
 import { GENERATORS, Generator, Params } from './gen';
 import { Rng } from './rng';
+import { GridType, addGridPath, gridSpacing } from './grid';
 import { History, autosave, deserialize, downloadBlob, exportPng, loadAutosave, safeName, serialize } from './io';
 
 // ---------- State ----------
@@ -125,7 +126,23 @@ function draw() {
   if (pending) requestRender();
 
   // Grid.
-  if (state.grid && view.zoom >= 7) {
+  if (state.grid && map.grid.type !== 'square' && view.zoom * gridSpacing(map.grid) >= 5) {
+    // Hex overlay, drawn in world units and clipped to the map.
+    const x0 = Math.max(0, -OX / Z), x1 = Math.min(map.width, (W - OX) / Z);
+    const y0 = Math.max(0, -OY / Z), y1 = Math.min(map.height, (H - OY) / Z);
+    ctx.save();
+    ctx.setTransform(Z, 0, 0, Z, OX, OY);
+    ctx.beginPath();
+    ctx.rect(0, 0, map.width, map.height);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(15,10,5,0.4)';
+    ctx.lineWidth = dpr / Z;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    addGridPath(ctx, map.grid, x0, y0, x1, y1);
+    ctx.stroke();
+    ctx.restore();
+  } else if (state.grid && map.grid.type === 'square' && view.zoom >= 7) {
     ctx.strokeStyle = 'rgba(15,10,5,0.28)';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -1105,6 +1122,24 @@ function toggleGrid() {
   requestRender();
 }
 $('btnGrid').onclick = toggleGrid;
+
+// Grid type (squares or hexes) and hex size; saved with the map.
+const gridType = $<HTMLSelectElement>('gridType'), hexSize = $<HTMLSelectElement>('hexSize');
+function syncGridControls() {
+  gridType.value = map.grid.type;
+  hexSize.value = String(map.grid.size);
+  hexSize.hidden = map.grid.type === 'square';
+}
+function onGridChange() {
+  map.grid = { type: gridType.value as GridType, size: Number(hexSize.value) };
+  if (!state.grid) toggleGrid();
+  syncGridControls();
+  autosave(map);
+  requestRender();
+}
+gridType.addEventListener('change', onGridChange);
+hexSize.addEventListener('change', onGridChange);
+syncGridControls();
 $('btnFit').onclick = fitView;
 $('btnUndo').onclick = undo;
 $('btnRedo').onclick = redo;
@@ -1136,6 +1171,7 @@ function loadMap(m: MapData) {
   state.area = null;
   select(null);
   nameInput.value = map.name;
+  syncGridControls();
   autosave(map);
   refreshGenTarget();
   fitView();
@@ -1167,6 +1203,7 @@ dlgNew.addEventListener('close', () => {
   h = Math.max(8, Math.min(400, Math.round(h || 45)));
   const m = new MapData(w, h, Number(($('newFill') as HTMLSelectElement).value) as T);
   m.name = ($('newName') as HTMLInputElement).value.trim() || 'Untitled map';
+  m.grid = { ...map.grid };
   loadMap(m);
 });
 
