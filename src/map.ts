@@ -1,5 +1,5 @@
 // Map data model: a tile grid of terrain plus a list of placed objects.
-import type { GridSpec } from './grid';
+import { GridSpec, hexAt, hexCenter, hexFromKey, hexKey } from './grid';
 
 export enum T {
   Void = 0,
@@ -97,6 +97,13 @@ export class MapData {
   name = 'Untitled map';
   /** Grid overlay shown in the editor and drawn on exports. */
   grid: GridSpec = { type: 'square', size: 1 };
+  /**
+   * Terrain painted with the hex brush, keyed by hexKey(q, r) for the current hex grid.
+   * Drawn as true hexagons over the squares; the squares underneath hold the same terrain.
+   */
+  hexCells = new Map<number, T>();
+  /** Height levels painted with the hex brush, drawn with hex-shaped cliffs. Same keys as hexCells. */
+  hexElev = new Map<number, number>();
 
   constructor(width: number, height: number, fill: T = T.Void) {
     this.width = width;
@@ -111,7 +118,14 @@ export class MapData {
     return this.elevation[y * this.width + x];
   }
   setElev(x: number, y: number, e: number): void {
-    if (this.inBounds(x, y)) this.elevation[y * this.width + x] = Math.max(MIN_ELEV, Math.min(MAX_ELEV, Math.round(e)));
+    if (!this.inBounds(x, y)) return;
+    const i = y * this.width + x;
+    const v = Math.max(MIN_ELEV, Math.min(MAX_ELEV, Math.round(e)));
+    if (this.hexElev.size && this.elevation[i] !== v) {
+      const h = hexAt(this.grid, x + 0.5, y + 0.5);
+      this.hexElev.delete(hexKey(h.q, h.r));
+    }
+    this.elevation[i] = v;
   }
 
   inBounds(x: number, y: number): boolean {
@@ -122,7 +136,24 @@ export class MapData {
     return this.terrain[y * this.width + x] as T;
   }
   set(x: number, y: number, t: T): void {
-    if (this.inBounds(x, y)) this.terrain[y * this.width + x] = t;
+    if (!this.inBounds(x, y)) return;
+    const i = y * this.width + x;
+    // Square painting over a painted hex turns that hex back into plain squares.
+    if (this.hexCells.size && this.terrain[i] !== t) {
+      const h = hexAt(this.grid, x + 0.5, y + 0.5);
+      this.hexCells.delete(hexKey(h.q, h.r));
+    }
+    this.terrain[i] = t;
+  }
+
+  /** Remove painted hexes whose centre lies inside the rect. */
+  clearHexCellsIn(r: Rect): void {
+    for (const cells of [this.hexCells, this.hexElev] as Map<number, unknown>[])
+      for (const k of [...cells.keys()]) {
+        const h = hexFromKey(k);
+        const c = hexCenter(this.grid, h.q, h.r);
+        if (c.x >= r.x && c.x < r.x + r.w && c.y >= r.y && c.y < r.y + r.h) cells.delete(k);
+      }
   }
 
   addObject(o: Omit<MapObject, 'id'>): MapObject {

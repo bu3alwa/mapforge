@@ -1,13 +1,16 @@
 // Save/load (JSON), autosave, undo history and PNG export.
-import { MapData, MapObject, Rect } from './map';
+import { MapData, MapObject, Rect, T } from './map';
 import { renderRegion } from './render';
-import { addGridPath, GRID_TYPES, HEX_SIZES } from './grid';
+import { GridSpec, addGridPath, GRID_TYPES, HEX_SIZES, hexFromKey, hexKey } from './grid';
 
 interface Snapshot {
   terrain: Uint8Array;
   elevation: Int8Array;
   objects: MapObject[];
   nextId: number;
+  hexCells: Map<number, T>;
+  hexElev: Map<number, number>;
+  grid: GridSpec;
 }
 
 export class History {
@@ -16,13 +19,16 @@ export class History {
   constructor(private limit = 60) {}
 
   private snap(map: MapData): Snapshot {
-    return { terrain: map.terrain.slice(), elevation: map.elevation.slice(), objects: structuredClone(map.objects), nextId: map.nextId };
+    return { terrain: map.terrain.slice(), elevation: map.elevation.slice(), objects: structuredClone(map.objects), nextId: map.nextId, hexCells: new Map(map.hexCells), hexElev: new Map(map.hexElev), grid: { ...map.grid } };
   }
   private apply(map: MapData, s: Snapshot) {
     map.terrain.set(s.terrain);
     map.elevation.set(s.elevation);
     map.objects = s.objects;
     map.nextId = s.nextId;
+    map.hexCells = s.hexCells;
+    map.hexElev = s.hexElev;
+    map.grid = s.grid;
   }
   /** Call before a change. */
   push(map: MapData) {
@@ -74,6 +80,8 @@ export function serialize(map: MapData): string {
     objects: map.objects,
     nextId: map.nextId,
     grid: map.grid,
+    hexCells: [...map.hexCells].map(([k, t]) => { const h = hexFromKey(k); return [h.q, h.r, t]; }),
+    hexElev: [...map.hexElev].map(([k, e]) => { const h = hexFromKey(k); return [h.q, h.r, e]; }),
   });
 }
 
@@ -92,6 +100,10 @@ export function deserialize(json: string): MapData {
   map.nextId = d.nextId ?? map.objects.reduce((m: number, o: MapObject) => Math.max(m, o.id + 1), 1);
   map.name = d.name ?? 'Untitled map';
   if (d.grid && GRID_TYPES.includes(d.grid.type)) map.grid = { type: d.grid.type, size: HEX_SIZES.includes(d.grid.size) ? d.grid.size : 1 };
+  if (map.grid.type !== 'square' && Array.isArray(d.hexCells))
+    for (const [q, r, t] of d.hexCells) if (Number.isInteger(q) && Number.isInteger(r) && Number.isInteger(t)) map.hexCells.set(hexKey(q, r), t);
+  if (map.grid.type !== 'square' && Array.isArray(d.hexElev))
+    for (const [q, r, e] of d.hexElev) if (Number.isInteger(q) && Number.isInteger(r) && Number.isInteger(e)) map.hexElev.set(hexKey(q, r), e);
   return map;
 }
 

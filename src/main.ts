@@ -5,7 +5,7 @@ import { OBJECT_BY_TYPE, OBJECT_CATEGORIES, OBJECT_DEFS, ObjectDef, drawObject, 
 import { textureCanvas } from './patterns';
 import { GENERATORS, Generator, Params } from './gen';
 import { Rng } from './rng';
-import { GridType, addGridPath, gridSpacing } from './grid';
+import { GridType, addGridPath, gridSpacing, hexAt, hexBounds, hexCenter, hexCorners, hexKey, hexNeighbors, hexRange, isHex } from './grid';
 import { History, autosave, deserialize, downloadBlob, exportPng, loadAutosave, safeName, serialize } from './io';
 
 // ---------- State ----------
@@ -28,6 +28,7 @@ const state = {
   labelSize: 1.5,
   labelColor: '#f4ead2',
   grid: true,
+  hexBrush: true,
   snap: (() => { try { return localStorage.getItem('mapforge.snap') !== '0'; } catch { return true; } })(),
   selected: null as MapObject | null,
   area: null as Rect | null,
@@ -211,7 +212,23 @@ function drawOverlays(px: number) {
   const hv = state.hover;
   if (!hv || drag?.kind === 'pan') return;
   const tool = state.tool;
-  if (tool === 'paint' || tool === 'erase' || tool === 'scatter' || tool === 'height') {
+  if ((tool === 'paint' || tool === 'height' || tool === 'fill') && hexMode()) {
+    const cells = tool === 'fill' ? [hexAt(map.grid, hv.x, hv.y)] : brushHexes(hv.x, hv.y);
+    ctx.beginPath();
+    for (const c of cells) {
+      const p = hexCorners(map.grid, c.q, c.r);
+      ctx.moveTo(p[0], p[1]);
+      for (let i = 2; i < 12; i += 2) ctx.lineTo(p[i], p[i + 1]);
+      ctx.closePath();
+    }
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3 * px;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.stroke();
+    ctx.lineWidth = 1.5 * px;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+  } else if (tool === 'paint' || tool === 'erase' || tool === 'scatter' || tool === 'height') {
     const c = brushCenter(hv.x, hv.y);
     ctx.beginPath();
     ctx.arc(c.x, c.y, Math.max(0.5, state.brush / 2), 0, Math.PI * 2);
@@ -271,7 +288,87 @@ function rectFromDrag(a: { x: number; y: number }, b: { x: number; y: number }):
 }
 
 // ---------- Editing operations ----------
+/** Paint, fill and height work in whole hexes when a hex grid is shown and "Paint in hexes" is on. */
+const hexMode = () => isHex(map.grid) && state.hexBrush;
+const hexBrushRadius = () => Math.floor((state.brush - 1) / 2);
+function brushHexes(x: number, y: number) {
+  const h = hexAt(map.grid, x, y);
+  return hexRange(h.q, h.r, hexBrushRadius());
+}
+/** Squares whose centre lies inside hex (q, r). */
+function tilesInHex(q: number, r: number, fn: (x: number, y: number) => void) {
+  const b = hexBounds(map.grid, q, r);
+  for (let y = Math.max(0, b.y); y < Math.min(map.height, b.y + b.h); y++)
+    for (let x = Math.max(0, b.x); x < Math.min(map.width, b.x + b.w); x++) {
+      const h = hexAt(map.grid, x + 0.5, y + 0.5);
+      if (h.q === q && h.r === r) fn(x, y);
+    }
+}
+/** Does hex (q, r) overlap the map at all? */
+function hexOnMap(q: number, r: number) {
+  const b = hexBounds(map.grid, q, r);
+  return b.x < map.width && b.y < map.height && b.x + b.w > 0 && b.y + b.h > 0;
+}
+function hexRect(cells: { q: number; r: number }[]): Rect | null {
+  let out: Rect | null = null;
+  for (const c of cells) { const b = hexBounds(map.grid, c.q, c.r); out = out ? union(out, b) : b; }
+  return out;
+}
+function paintHex(q: number, r: number, t: T): boolean {
+  const k = hexKey(q, r);
+  if (map.hexCells.get(k) === t || !hexOnMap(q, r)) return false;
+  tilesInHex(q, r, (x, y) => map.set(x, y, t));
+  map.hexCells.set(k, t);
+  return true;
+}
+function paintHexesAt(x: number, y: number, t: T) {
+  const done = brushHexes(x, y).filter((c) => paintHex(c.q, c.r, t));
+  const b = hexRect(done);
+  if (b) changed(b);
+}
+function heightHexesAt(x: number, y: number, level: number) {
+  const cells = brushHexes(x, y);
+  let any = false;
+  for (const c of cells) {
+    if (!hexOnMap(c.q, c.r)) continue;
+    const k = hexKey(c.q, c.r);
+    tilesInHex(c.q, c.r, (tx, ty) => { if (map.getElev(tx, ty) !== level) { map.setElev(tx, ty, level); any = true; } });
+    if (map.hexElev.get(k) !== level) { map.hexElev.set(k, level); any = true; }
+  }
+  const b = hexRect(cells);
+  if (any && b) changed(b, 6);
+}
+/** Terrain of a hex: its painted value, or the square under its centre. */
+function hexTerrain(q: number, r: number): T {
+  const t = map.hexCells.get(hexKey(q, r));
+  if (t !== undefined) return t;
+  const c = hexCenter(map.grid, q, r);
+  return map.get(Math.min(map.width - 1, Math.max(0, Math.floor(c.x))), Math.min(map.height - 1, Math.max(0, Math.floor(c.y))));
+}
+function floodFillHex(x: number, y: number, t: T) {
+  const start = hexAt(map.grid, x, y);
+  const from = hexTerrain(start.q, start.r);
+  if (from === t && map.hexCells.has(hexKey(start.q, start.r))) return;
+  const seen = new Set<number>();
+  const stack = [start];
+  const done: { q: number; r: number }[] = [];
+  while (stack.length && done.length < 50_000) {
+    const c = stack.pop()!;
+    const k = hexKey(c.q, c.r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    if (!hexOnMap(c.q, c.r) || hexTerrain(c.q, c.r) !== from) continue;
+    paintHex(c.q, c.r, t);
+    map.hexCells.set(k, t);
+    done.push(c);
+    stack.push(...hexNeighbors(c.q, c.r));
+  }
+  const b = hexRect(done);
+  if (b) changed(b);
+}
+
 function paintAt(x: number, y: number, t: T, bounds: Rect | null): Rect | null {
+  if (hexMode()) { paintHexesAt(x, y, t); return bounds; }
   const c = brushCenter(x, y);
   const r = Math.max(0.5, state.brush / 2);
   let any = false;
@@ -288,6 +385,7 @@ function paintAt(x: number, y: number, t: T, bounds: Rect | null): Rect | null {
 }
 
 function heightAt(x: number, y: number, level: number) {
+  if (hexMode()) { heightHexesAt(x, y, level); return; }
   const c = brushCenter(x, y);
   const r = Math.max(0.5, state.brush / 2);
   let any = false;
@@ -314,6 +412,7 @@ function fillRect(r: Rect, t: T, walls: boolean) {
 }
 
 function floodFill(x: number, y: number, t: T) {
+  if (hexMode()) { floodFillHex(x, y, t); return; }
   x = Math.floor(x); y = Math.floor(y);
   if (!map.inBounds(x, y)) return;
   const from = map.get(x, y);
@@ -342,6 +441,7 @@ const snapping = () => state.snap !== shiftHeld;
 
 function snapCenter(def: ObjectDef | undefined, x: number, y: number, w: number, h: number, rot: number) {
   if (!def?.snap || !snapping()) return { x, y };
+  if (isHex(map.grid)) { const h = hexAt(map.grid, x, y); return hexCenter(map.grid, h.q, h.r); }
   const rotated = Math.abs(Math.sin(rot)) > 0.5;
   const bw = rotated ? h : w, bh = rotated ? w : h;
   const sx = Number.isInteger(bw) ? Math.round(x - bw / 2) + bw / 2 : Math.floor(x) + 0.5;
@@ -639,8 +739,8 @@ window.addEventListener('keyup', (e) => {
   if (e.key === ' ') { spaceDown = false; canvas.style.cursor = cursorFor(state.tool); }
 });
 
-function undo() { if (history.undo(map)) { select(null); changed(); toast('Undo'); } }
-function redo() { if (history.redo(map)) { select(null); changed(); toast('Redo'); } }
+function undo() { if (history.undo(map)) { select(null); syncGridControls(); renderToolOptions(); changed(); toast('Undo'); } }
+function redo() { if (history.redo(map)) { select(null); syncGridControls(); renderToolOptions(); changed(); toast('Redo'); } }
 
 /**
  * Move the selected object up or down the draw order among the objects it overlaps.
@@ -792,7 +892,15 @@ function renderToolOptions() {
   const form = document.createElement('div');
   form.className = 'form';
   el.appendChild(form);
-  const brushSlider = () => slider('Brush size', 'optBrush', 1, 30, 1, state.brush, (v) => `${v} sq · ${v * 5} ft`, (v) => { state.brush = v; requestRender(); });
+  const brushFmt = (v: number) => {
+    if (!hexMode()) return `${v} sq · ${v * 5} ft`;
+    const n = Math.floor((v - 1) / 2), count = 1 + 3 * n * (n + 1);
+    return count === 1 ? '1 hex' : `${count} hexes`;
+  };
+  const brushSlider = () => slider('Brush size', 'optBrush', 1, 30, 1, state.brush, brushFmt, (v) => { state.brush = v; requestRender(); });
+  // On a hex grid, choose between painting whole hexes and plain squares.
+  const hexToggle = () => checkbox('Paint in hexes', state.hexBrush, (v) => { state.hexBrush = v; renderToolOptions(); requestRender(); });
+  if (isHex(map.grid) && (state.tool === 'paint' || state.tool === 'fill' || state.tool === 'height')) form.append(hexToggle());
   switch (state.tool) {
     case 'paint':
       form.append(brushSlider(), hint(`Painting <b>${TERRAIN[state.terrain].name}</b>. Paint <b>Rock (void)</b> to erase floors. <kbd>[</kbd> <kbd>]</kbd> change size.`));
@@ -1121,6 +1229,7 @@ function runGenerator() {
   history.push(map);
   select(null);
   map.removeObjectsIn(region);
+  map.clearHexCellsIn(region);
   for (let y = region.y; y < region.y + region.h; y++) for (let x = region.x; x < region.x + region.w; x++) map.setElev(x, y, 0);
   const t0 = performance.now();
   g.run({ map, region, rng: new Rng(`${state.seed}:${g.id}`) }, state.genParams[g.id]);
@@ -1173,7 +1282,18 @@ function syncGridControls() {
   hexSize.hidden = map.grid.type === 'square';
 }
 function onGridChange() {
-  map.grid = { type: gridType.value as GridType, size: Number(hexSize.value) };
+  const next = { type: gridType.value as GridType, size: Number(hexSize.value) };
+  const differs = next.type !== map.grid.type || next.size !== map.grid.size;
+  // Grid changes go in the undo history so undoing older edits never mixes up grids.
+  if (differs) history.push(map);
+  if ((map.hexCells.size || map.hexElev.size) && differs) {
+    map.hexCells.clear();
+    map.hexElev.clear();
+    changed();
+    toast('Painted hexes were turned into squares for the new grid (Undo brings them back)');
+  }
+  map.grid = next;
+  renderToolOptions();
   if (!state.grid) toggleGrid();
   syncGridControls();
   autosave(map);

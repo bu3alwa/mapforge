@@ -3,6 +3,7 @@ import { DRAW_ORDER, MapData, MapObject, T, TERRAIN, objectBounds } from './map'
 import { terrainPattern } from './patterns';
 import { drawObject } from './objects';
 import { hash2 } from './rng';
+import { hexAt, hexCenter, hexCorners, hexesInRect, hexKey, hexNeighbors, isHex } from './grid';
 
 const FLOORS = new Set<T>([T.Stone, T.Wood]);
 
@@ -171,13 +172,22 @@ export function renderRegion(
     }
   }
 
+  if (map.hexCells.size && isHex(map.grid)) renderHexCells(ctx, map, x0, y0, x1, y1);
+
   // Wall lines where floors meet solid rock, and around built walls.
   const walls = new Path2D();
   const shadowPath = new Path2D();
+  // Squares under painted hexes get their outline from the hex edges instead.
+  const hexes = map.hexCells.size > 0 && isHex(map.grid);
+  const inHexCell = (x: number, y: number) => {
+    const h = hexAt(map.grid, x + 0.5, y + 0.5);
+    return map.hexCells.has(hexKey(h.q, h.r));
+  };
   for (let y = ay0; y < ay1; y++) {
     for (let x = ax0; x < ax1; x++) {
       const a = map.terrain[y * map.width + x] as T;
       if (!FLOORS.has(a) && a !== T.Wall) continue;
+      if (hexes && (inHexCell(x, y) || inHexCell(x - 1, y) || inHexCell(x + 1, y) || inHexCell(x, y - 1) || inHexCell(x, y + 1))) continue;
       const n = map.get(x, y - 1), s = map.get(x, y + 1), w = map.get(x - 1, y), e = map.get(x + 1, y);
       if (edgeSolid(a, n)) { walls.moveTo(x, y); walls.lineTo(x + 1, y); if (FLOORS.has(a)) shadowPath.rect(x, y, 1, 0.28); }
       if (edgeSolid(a, s)) { walls.moveTo(x, y + 1); walls.lineTo(x + 1, y + 1); }
@@ -185,6 +195,7 @@ export function renderRegion(
       if (edgeSolid(a, e)) { walls.moveTo(x + 1, y); walls.lineTo(x + 1, y + 1); }
     }
   }
+  if (hexes) addHexWalls(map, x0, y0, x1, y1, walls);
   ctx.fillStyle = 'rgba(0,0,0,0.22)';
   ctx.fill(shadowPath);
   ctx.lineCap = 'square';
@@ -205,6 +216,63 @@ export function renderRegion(
     for (const o of list) drawObject(ctx, o);
   }
   ctx.restore();
+}
+
+/** Terrain painted with the hex brush: true hexagons drawn over the square terrain. */
+function renderHexCells(ctx: CanvasRenderingContext2D, map: MapData, x0: number, y0: number, x1: number, y1: number) {
+  const g = map.grid;
+  const { q0, q1, r0, r1 } = hexesInRect(g, x0, y0, x1, y1);
+  const byTerrain = new Map<T, Path2D>();
+  for (let r = r0; r <= r1; r++)
+    for (let q = q0; q <= q1; q++) {
+      const t = map.hexCells.get(hexKey(q, r));
+      if (t === undefined) continue;
+      let p = byTerrain.get(t);
+      if (!p) byTerrain.set(t, (p = new Path2D()));
+      // Grown slightly so neighbouring hexes overlap instead of leaving hairline seams.
+      const c = hexCorners(g, q, r, 0.02);
+      p.moveTo(c[0], c[1]);
+      for (let i = 2; i < 12; i += 2) p.lineTo(c[i], c[i + 1]);
+      p.closePath();
+    }
+  for (const t of DRAW_ORDER.concat(T.Void)) {
+    const p = byTerrain.get(t);
+    if (!p) continue;
+    ctx.fillStyle = terrainPattern(ctx, t);
+    ctx.fill(p);
+    if (t === T.Lava) {
+      ctx.strokeStyle = 'rgba(255,140,40,0.55)';
+      ctx.lineWidth = 0.08;
+      ctx.stroke(p);
+    }
+  }
+}
+
+/** Outline painted floor and wall hexes where they meet solid rock (or floors, for walls). */
+function addHexWalls(map: MapData, x0: number, y0: number, x1: number, y1: number, walls: Path2D) {
+  const g = map.grid;
+  const terrainOf = (q: number, r: number): T => {
+    const t = map.hexCells.get(hexKey(q, r));
+    if (t !== undefined) return t;
+    const c = hexCenter(g, q, r);
+    return map.get(Math.floor(c.x), Math.floor(c.y));
+  };
+  const { q0, q1, r0, r1 } = hexesInRect(g, x0 - 1, y0 - 1, x1 + 1, y1 + 1);
+  for (let r = r0; r <= r1; r++)
+    for (let q = q0; q <= q1; q++) {
+      const a = map.hexCells.get(hexKey(q, r));
+      if (a === undefined || (!FLOORS.has(a) && a !== T.Wall)) continue;
+      const corners = hexCorners(g, q, r);
+      for (const n of hexNeighbors(q, r)) {
+        if (!edgeSolid(a, terrainOf(n.q, n.r))) continue;
+        // The shared edge is formed by the two corners nearest the neighbour's centre.
+        const nc = hexCenter(g, n.q, n.r);
+        const idx = [0, 1, 2, 3, 4, 5].sort((i, j) =>
+          Math.hypot(corners[i * 2] - nc.x, corners[i * 2 + 1] - nc.y) - Math.hypot(corners[j * 2] - nc.x, corners[j * 2 + 1] - nc.y));
+        walls.moveTo(corners[idx[0] * 2], corners[idx[0] * 2 + 1]);
+        walls.lineTo(corners[idx[1] * 2], corners[idx[1] * 2 + 1]);
+      }
+    }
 }
 
 /** Default paint order by type: floor coverings, clutter, furniture, buildings, trees, labels. */
@@ -237,49 +305,98 @@ function renderElevation(ctx: CanvasRenderingContext2D, map: MapData, x0: number
     }
   if (minE === maxE) return;
   const W = x1 - x0, H = y1 - y0;
+  // Heights painted with the hex brush get hex-shaped cliffs; everything else uses smoothed tile contours.
+  const hexes = map.hexElev.size > 0 && isHex(map.grid);
+  const underHex = (x: number, y: number) => {
+    const h = hexAt(map.grid, Math.min(map.width - 1, Math.max(0, x)) + 0.5, Math.min(map.height - 1, Math.max(0, y)) + 0.5);
+    return map.hexElev.has(hexKey(h.q, h.r));
+  };
   for (let L = minE + 1; L <= maxE; L++) {
-    const high = contourPath((x, y) => map.getElev(x, y) >= L, x0 - 4, y0 - 4, x1 + 4, y1 + 4, 0.08);
-    const outside = new Path2D();
-    outside.rect(x0 - 6, y0 - 6, W + 12, H + 12);
-    outside.addPath(high);
+    const high = contourPath((x, y) => map.getElev(x, y) >= L && !(hexes && underHex(x, y)), x0 - 4, y0 - 4, x1 + 4, y1 + 4, 0.08);
+    drawElevationStep(ctx, high, high, L, x0, y0, W, H, scale);
+    if (hexes) {
+      const hx = hexElevationPaths(map, L, x0, y0, x1, y1);
+      if (hx) drawElevationStep(ctx, hx.high, hx.edges, L, x0, y0, W, H, scale);
+    }
+  }
+}
 
-    // Shadow falling onto the lower side: draw the shape far away so only its blurred, offset shadow lands here.
+/** Hex-shaped raised area for level L (painted hexes at or above L) and its outer edges. */
+function hexElevationPaths(map: MapData, L: number, x0: number, y0: number, x1: number, y1: number) {
+  const g = map.grid;
+  const levelOf = (q: number, r: number) => {
+    const e = map.hexElev.get(hexKey(q, r));
+    if (e !== undefined) return e;
+    const c = hexCenter(g, q, r);
+    return map.getElev(Math.floor(c.x), Math.floor(c.y));
+  };
+  const high = new Path2D(), edges = new Path2D();
+  let any = false;
+  const { q0, q1, r0, r1 } = hexesInRect(g, x0 - 5, y0 - 5, x1 + 5, y1 + 5);
+  for (let r = r0; r <= r1; r++)
+    for (let q = q0; q <= q1; q++) {
+      const e = map.hexElev.get(hexKey(q, r));
+      if (e === undefined || e < L) continue;
+      any = true;
+      const c = hexCorners(g, q, r);
+      high.moveTo(c[0], c[1]);
+      for (let i = 2; i < 12; i += 2) high.lineTo(c[i], c[i + 1]);
+      high.closePath();
+      for (const n of hexNeighbors(q, r)) {
+        if (levelOf(n.q, n.r) >= L) continue;
+        const nc = hexCenter(g, n.q, n.r);
+        const idx = [0, 1, 2, 3, 4, 5].sort((i, j) =>
+          Math.hypot(c[i * 2] - nc.x, c[i * 2 + 1] - nc.y) - Math.hypot(c[j * 2] - nc.x, c[j * 2 + 1] - nc.y));
+        edges.moveTo(c[idx[0] * 2], c[idx[0] * 2 + 1]);
+        edges.lineTo(c[idx[1] * 2], c[idx[1] * 2 + 1]);
+      }
+    }
+  return any ? { high, edges } : null;
+}
+
+/** One height step: shadow cast onto the lower side, pit darkening or lift, then the lit rim and dark cliff edge. */
+function drawElevationStep(ctx: CanvasRenderingContext2D, high: Path2D, edges: Path2D, L: number, x0: number, y0: number, W: number, H: number, scale: number) {
+  const outside = new Path2D();
+  outside.rect(x0 - 6, y0 - 6, W + 12, H + 12);
+  outside.addPath(high);
+
+  // Shadow falling onto the lower side: draw the shape far away so only its blurred, offset shadow lands here.
+  ctx.save();
+  ctx.clip(outside, 'evenodd');
+  const far = 2000;
+  ctx.shadowColor = 'rgba(0,0,0,0.55)';
+  ctx.shadowBlur = 0.35 * scale;
+  ctx.shadowOffsetX = (-far + 0.32) * scale;
+  ctx.shadowOffsetY = 0.42 * scale;
+  ctx.translate(far, 0);
+  ctx.fillStyle = '#000';
+  ctx.fill(high, 'evenodd');
+  ctx.restore();
+
+  if (L <= 0) {
+    // Below-ground side of this step is a pit: darken it.
     ctx.save();
     ctx.clip(outside, 'evenodd');
-    const far = 2000;
-    ctx.shadowColor = 'rgba(0,0,0,0.55)';
-    ctx.shadowBlur = 0.35 * scale;
-    ctx.shadowOffsetX = (-far + 0.32) * scale;
-    ctx.shadowOffsetY = 0.42 * scale;
-    ctx.translate(far, 0);
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.fillRect(x0 - 6, y0 - 6, W + 12, H + 12);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = 'rgba(255,240,210,0.05)';
     ctx.fill(high, 'evenodd');
-    ctx.restore();
-
-    if (L <= 0) {
-      // Below-ground side of this step is a pit: darken it.
-      ctx.save();
-      ctx.clip(outside, 'evenodd');
-      ctx.fillStyle = 'rgba(0,0,0,0.16)';
-      ctx.fillRect(x0 - 6, y0 - 6, W + 12, H + 12);
-      ctx.restore();
-    } else {
-      ctx.fillStyle = 'rgba(255,240,210,0.05)';
-      ctx.fill(high, 'evenodd');
-    }
-    // Lit top rim, then the dark cliff edge.
-    ctx.save();
-    ctx.clip(high, 'evenodd');
-    ctx.translate(0.07, 0.07);
-    ctx.strokeStyle = 'rgba(255,245,225,0.32)';
-    ctx.lineWidth = 0.1;
-    ctx.stroke(high);
-    ctx.restore();
-    ctx.strokeStyle = 'rgba(22,16,10,0.85)';
-    ctx.lineWidth = 0.1;
-    ctx.lineJoin = 'round';
-    ctx.stroke(high);
   }
+  // Lit top rim, then the dark cliff edge.
+  ctx.save();
+  ctx.clip(high, 'evenodd');
+  ctx.translate(0.07, 0.07);
+  ctx.strokeStyle = 'rgba(255,245,225,0.32)';
+  ctx.lineWidth = 0.1;
+  ctx.stroke(edges);
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(22,16,10,0.85)';
+  ctx.lineWidth = 0.1;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke(edges);
 }
 
 export const CHUNK = 16;
