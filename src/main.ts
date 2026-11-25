@@ -70,6 +70,8 @@ function requestRender() {
 
 let saveTimer = 0;
 function changed(rect?: Rect, margin = 3) {
+  // A changed square can redraw its whole hex, so widen the refresh area on hex maps.
+  if (isHex(map.grid)) margin = Math.max(margin, map.grid.size + 2);
   if (rect) cache.invalidateRect(rect.x, rect.y, rect.w, rect.h, margin);
   else cache.invalidateAll();
   clearTimeout(saveTimer);
@@ -289,7 +291,7 @@ function rectFromDrag(a: { x: number; y: number }, b: { x: number; y: number }):
 
 // ---------- Editing operations ----------
 /** Paint, fill and height work in whole hexes when a hex grid is shown and "Paint in hexes" is on. */
-const hexMode = () => isHex(map.grid) && state.hexBrush;
+const hexMode = () => isHex(map.grid) && (state.hexBrush || !map.grid.squares);
 const hexBrushRadius = () => Math.floor((state.brush - 1) / 2);
 function brushHexes(x: number, y: number) {
   const h = hexAt(map.grid, x, y);
@@ -900,7 +902,8 @@ function renderToolOptions() {
   const brushSlider = () => slider('Brush size', 'optBrush', 1, 30, 1, state.brush, brushFmt, (v) => { state.brush = v; requestRender(); });
   // On a hex grid, choose between painting whole hexes and plain squares.
   const hexToggle = () => checkbox('Paint in hexes', state.hexBrush, (v) => { state.hexBrush = v; renderToolOptions(); requestRender(); });
-  if (isHex(map.grid) && (state.tool === 'paint' || state.tool === 'fill' || state.tool === 'height')) form.append(hexToggle());
+  // With hex terrain everything is drawn in hexes, so the brush always paints whole hexes.
+  if (isHex(map.grid) && map.grid.squares && (state.tool === 'paint' || state.tool === 'fill' || state.tool === 'height')) form.append(hexToggle());
   switch (state.tool) {
     case 'paint':
       form.append(brushSlider(), hint(`Painting <b>${TERRAIN[state.terrain].name}</b>. Paint <b>Rock (void)</b> to erase floors. <kbd>[</kbd> <kbd>]</kbd> change size.`));
@@ -1275,14 +1278,16 @@ $('btnSnap').onclick = toggleSnap;
 $('btnSnap').classList.toggle('on', state.snap);
 
 // Grid type (squares or hexes) and hex size; saved with the map.
-const gridType = $<HTMLSelectElement>('gridType'), hexSize = $<HTMLSelectElement>('hexSize');
+const gridType = $<HTMLSelectElement>('gridType'), hexSize = $<HTMLSelectElement>('hexSize'), btnHexTerrain = $('btnHexTerrain');
 function syncGridControls() {
   gridType.value = map.grid.type;
   hexSize.value = String(map.grid.size);
   hexSize.hidden = map.grid.type === 'square';
+  btnHexTerrain.hidden = map.grid.type === 'square';
+  btnHexTerrain.classList.toggle('on', !map.grid.squares);
 }
 function onGridChange() {
-  const next = { type: gridType.value as GridType, size: Number(hexSize.value) };
+  const next = { type: gridType.value as GridType, size: Number(hexSize.value), squares: map.grid.squares };
   const differs = next.type !== map.grid.type || next.size !== map.grid.size;
   // Grid changes go in the undo history so undoing older edits never mixes up grids.
   if (differs) history.push(map);
@@ -1300,6 +1305,15 @@ function onGridChange() {
   requestRender();
 }
 gridType.addEventListener('change', onGridChange);
+// Hex terrain on: every hex is drawn whole. Off: terrain stays square under the hex overlay.
+btnHexTerrain.onclick = () => {
+  history.push(map);
+  map.grid = { ...map.grid, squares: !map.grid.squares || undefined };
+  syncGridControls();
+  renderToolOptions();
+  changed();
+  toast(map.grid.squares ? 'Terrain drawn as squares under the hex grid' : 'Terrain drawn as whole hexes');
+};
 hexSize.addEventListener('change', onGridChange);
 syncGridControls();
 $('btnFit').onclick = fitView;

@@ -125,8 +125,10 @@ export function renderRegion(
   const ax0 = Math.max(0, x0 - m), ay0 = Math.max(0, y0 - m);
   const ax1 = Math.min(map.width, x1 + m), ay1 = Math.min(map.height, y1 + m);
 
-  // Bucket tiles by terrain.
+  const allHex = hexTerrain(map);
+  // Bucket tiles by terrain (not needed when every hex is drawn whole).
   const buckets = new Map<T, number[]>();
+  if (!allHex)
   for (let y = ay0; y < ay1; y++) {
     for (let x = ax0; x < ax1; x++) {
       const t = map.terrain[y * map.width + x] as T;
@@ -172,18 +174,19 @@ export function renderRegion(
     }
   }
 
-  if (map.hexCells.size && isHex(map.grid)) renderHexCells(ctx, map, x0, y0, x1, y1);
+  if (allHex) renderHexCells(ctx, map, x0, y0, x1, y1, true);
+  else if (map.hexCells.size && isHex(map.grid)) renderHexCells(ctx, map, x0, y0, x1, y1);
 
   // Wall lines where floors meet solid rock, and around built walls.
   const walls = new Path2D();
   const shadowPath = new Path2D();
   // Squares under painted hexes get their outline from the hex edges instead.
-  const hexes = map.hexCells.size > 0 && isHex(map.grid);
+  const hexes = map.hexCells.size > 0 && isHex(map.grid) && !allHex;
   const inHexCell = (x: number, y: number) => {
     const h = hexAt(map.grid, x + 0.5, y + 0.5);
     return map.hexCells.has(hexKey(h.q, h.r));
   };
-  for (let y = ay0; y < ay1; y++) {
+  if (!allHex) for (let y = ay0; y < ay1; y++) {
     for (let x = ax0; x < ax1; x++) {
       const a = map.terrain[y * map.width + x] as T;
       if (!FLOORS.has(a) && a !== T.Wall) continue;
@@ -195,7 +198,8 @@ export function renderRegion(
       if (edgeSolid(a, e)) { walls.moveTo(x + 1, y); walls.lineTo(x + 1, y + 1); }
     }
   }
-  if (hexes) addHexWalls(map, x0, y0, x1, y1, walls);
+  if (allHex) addHexWalls(map, x0, y0, x1, y1, walls, true);
+  else if (hexes) addHexWalls(map, x0, y0, x1, y1, walls);
   ctx.fillStyle = 'rgba(0,0,0,0.22)';
   ctx.fill(shadowPath);
   ctx.lineCap = 'square';
@@ -218,14 +222,31 @@ export function renderRegion(
   ctx.restore();
 }
 
-/** Terrain painted with the hex brush: true hexagons drawn over the square terrain. */
-function renderHexCells(ctx: CanvasRenderingContext2D, map: MapData, x0: number, y0: number, x1: number, y1: number) {
+/** On a hex grid the terrain itself is drawn as hexes, unless the map is set to square terrain. */
+export const hexTerrain = (map: MapData) => isHex(map.grid) && !map.grid.squares;
+
+/** Terrain of a hex: its painted value, or the square under its centre (clamped to the map). */
+function hexTerrainOf(map: MapData, q: number, r: number): T {
+  const t = map.hexCells.get(hexKey(q, r));
+  if (t !== undefined) return t;
+  const c = hexCenter(map.grid, q, r);
+  return map.terrain[Math.min(map.height - 1, Math.max(0, Math.floor(c.y))) * map.width + Math.min(map.width - 1, Math.max(0, Math.floor(c.x)))] as T;
+}
+function hexLevelOf(map: MapData, q: number, r: number): number {
+  const e = map.hexElev.get(hexKey(q, r));
+  if (e !== undefined) return e;
+  const c = hexCenter(map.grid, q, r);
+  return map.getElev(Math.floor(c.x), Math.floor(c.y));
+}
+
+/** Terrain painted with the hex brush (or, with `all`, every hex) drawn as true hexagons. */
+function renderHexCells(ctx: CanvasRenderingContext2D, map: MapData, x0: number, y0: number, x1: number, y1: number, all = false) {
   const g = map.grid;
   const { q0, q1, r0, r1 } = hexesInRect(g, x0, y0, x1, y1);
   const byTerrain = new Map<T, Path2D>();
   for (let r = r0; r <= r1; r++)
     for (let q = q0; q <= q1; q++) {
-      const t = map.hexCells.get(hexKey(q, r));
+      const t = all ? hexTerrainOf(map, q, r) : map.hexCells.get(hexKey(q, r));
       if (t === undefined) continue;
       let p = byTerrain.get(t);
       if (!p) byTerrain.set(t, (p = new Path2D()));
@@ -249,22 +270,20 @@ function renderHexCells(ctx: CanvasRenderingContext2D, map: MapData, x0: number,
 }
 
 /** Outline painted floor and wall hexes where they meet solid rock (or floors, for walls). */
-function addHexWalls(map: MapData, x0: number, y0: number, x1: number, y1: number, walls: Path2D) {
+function addHexWalls(map: MapData, x0: number, y0: number, x1: number, y1: number, walls: Path2D, all = false) {
   const g = map.grid;
-  const terrainOf = (q: number, r: number): T => {
-    const t = map.hexCells.get(hexKey(q, r));
-    if (t !== undefined) return t;
-    const c = hexCenter(g, q, r);
-    return map.get(Math.floor(c.x), Math.floor(c.y));
-  };
+  const terrainOf = (q: number, r: number) => hexTerrainOf(map, q, r);
   const { q0, q1, r0, r1 } = hexesInRect(g, x0 - 1, y0 - 1, x1 + 1, y1 + 1);
   for (let r = r0; r <= r1; r++)
     for (let q = q0; q <= q1; q++) {
-      const a = map.hexCells.get(hexKey(q, r));
-      if (a === undefined || (!FLOORS.has(a) && a !== T.Wall)) continue;
+      const a = all ? terrainOf(q, r) : map.hexCells.get(hexKey(q, r));
+      // Cave floor gets an edge against solid rock too, like its rim on square maps.
+      const cave = a === T.CaveFloor;
+      if (a === undefined || (!FLOORS.has(a) && a !== T.Wall && !cave)) continue;
       const corners = hexCorners(g, q, r);
       for (const n of hexNeighbors(q, r)) {
-        if (!edgeSolid(a, terrainOf(n.q, n.r))) continue;
+        const nt = terrainOf(n.q, n.r);
+        if (!(cave ? nt === T.Void : edgeSolid(a, nt))) continue;
         // The shared edge is formed by the two corners nearest the neighbour's centre.
         const nc = hexCenter(g, n.q, n.r);
         const idx = [0, 1, 2, 3, 4, 5].sort((i, j) =>
@@ -306,12 +325,18 @@ function renderElevation(ctx: CanvasRenderingContext2D, map: MapData, x0: number
   if (minE === maxE) return;
   const W = x1 - x0, H = y1 - y0;
   // Heights painted with the hex brush get hex-shaped cliffs; everything else uses smoothed tile contours.
+  const allHex = hexTerrain(map);
   const hexes = map.hexElev.size > 0 && isHex(map.grid);
   const underHex = (x: number, y: number) => {
     const h = hexAt(map.grid, Math.min(map.width - 1, Math.max(0, x)) + 0.5, Math.min(map.height - 1, Math.max(0, y)) + 0.5);
     return map.hexElev.has(hexKey(h.q, h.r));
   };
   for (let L = minE + 1; L <= maxE; L++) {
+    if (allHex) {
+      const hx = hexElevationPaths(map, L, x0, y0, x1, y1, true);
+      if (hx) drawElevationStep(ctx, hx.high, hx.edges, L, x0, y0, W, H, scale);
+      continue;
+    }
     const high = contourPath((x, y) => map.getElev(x, y) >= L && !(hexes && underHex(x, y)), x0 - 4, y0 - 4, x1 + 4, y1 + 4, 0.08);
     drawElevationStep(ctx, high, high, L, x0, y0, W, H, scale);
     if (hexes) {
@@ -322,20 +347,15 @@ function renderElevation(ctx: CanvasRenderingContext2D, map: MapData, x0: number
 }
 
 /** Hex-shaped raised area for level L (painted hexes at or above L) and its outer edges. */
-function hexElevationPaths(map: MapData, L: number, x0: number, y0: number, x1: number, y1: number) {
+function hexElevationPaths(map: MapData, L: number, x0: number, y0: number, x1: number, y1: number, all = false) {
   const g = map.grid;
-  const levelOf = (q: number, r: number) => {
-    const e = map.hexElev.get(hexKey(q, r));
-    if (e !== undefined) return e;
-    const c = hexCenter(g, q, r);
-    return map.getElev(Math.floor(c.x), Math.floor(c.y));
-  };
+  const levelOf = (q: number, r: number) => hexLevelOf(map, q, r);
   const high = new Path2D(), edges = new Path2D();
   let any = false;
   const { q0, q1, r0, r1 } = hexesInRect(g, x0 - 5, y0 - 5, x1 + 5, y1 + 5);
   for (let r = r0; r <= r1; r++)
     for (let q = q0; q <= q1; q++) {
-      const e = map.hexElev.get(hexKey(q, r));
+      const e = all ? levelOf(q, r) : map.hexElev.get(hexKey(q, r));
       if (e === undefined || e < L) continue;
       any = true;
       const c = hexCorners(g, q, r);

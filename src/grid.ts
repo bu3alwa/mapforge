@@ -10,6 +10,8 @@ export interface GridSpec {
   type: GridType;
   /** Hex width across the flats, in squares (ignored for square grids). */
   size: number;
+  /** On a hex grid, keep drawing terrain as squares instead of whole hexes. */
+  squares?: boolean;
 }
 
 /**

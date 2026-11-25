@@ -99,7 +99,7 @@ export function deserialize(json: string): MapData {
   map.objects = d.objects ?? [];
   map.nextId = d.nextId ?? map.objects.reduce((m: number, o: MapObject) => Math.max(m, o.id + 1), 1);
   map.name = d.name ?? 'Untitled map';
-  if (d.grid && GRID_TYPES.includes(d.grid.type)) map.grid = { type: d.grid.type, size: HEX_SIZES.includes(d.grid.size) ? d.grid.size : 1 };
+  if (d.grid && GRID_TYPES.includes(d.grid.type)) map.grid = { type: d.grid.type, size: HEX_SIZES.includes(d.grid.size) ? d.grid.size : 1, squares: d.grid.squares === true || undefined };
   if (map.grid.type !== 'square' && Array.isArray(d.hexCells))
     for (const [q, r, t] of d.hexCells) if (Number.isInteger(q) && Number.isInteger(r) && Number.isInteger(t)) map.hexCells.set(hexKey(q, r), t);
   if (map.grid.type !== 'square' && Array.isArray(d.hexElev))
