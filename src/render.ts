@@ -1,7 +1,7 @@
 // Renders map regions (terrain, walls, objects) into canvases, with a chunk cache for the editor view.
 import { DRAW_ORDER, MapData, MapObject, T, TERRAIN, objectBounds } from './map';
 import { terrainPattern } from './patterns';
-import { drawObject } from './objects';
+import { OBJECT_BY_TYPE, drawObject } from './objects';
 import { hash2 } from './rng';
 import { hexAt, hexCenter, hexCorners, hexesInRect, hexKey, hexNeighbors, isHex } from './grid';
 
@@ -297,6 +297,8 @@ function addHexWalls(map: MapData, x0: number, y0: number, x1: number, y1: numbe
 /** Default paint order by type: floor coverings, clutter, furniture, buildings, trees, labels. */
 export function defaultLayer(type: string): number {
   if (type === 'label') return 6;
+  const layer = OBJECT_BY_TYPE.get(type)?.layer;
+  if (layer !== undefined) return layer;
   if (type === 'tree' || type === 'pine' || type === 'deadtree' || type === 'palm') return 5;
   if (type === 'house' || type === 'tower') return 4;
   if (type === 'torch' || type === 'campfire' || type === 'lantern') return 3;

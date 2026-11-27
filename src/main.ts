@@ -1052,36 +1052,93 @@ function objectIcon(def: ObjectDef): string {
   return url;
 }
 
+// Which object categories are expanded, remembered per browser.
+const openCats: Set<string> = (() => {
+  try {
+    const v = JSON.parse(localStorage.getItem('mapforge.objCats') ?? 'null');
+    if (Array.isArray(v)) return new Set(v.map(String));
+  } catch { /* ignore */ }
+  return new Set(['Nature', 'Dungeon', 'Furniture']);
+})();
+function saveOpenCats() {
+  try { localStorage.setItem('mapforge.objCats', JSON.stringify([...openCats])); } catch { /* ignore */ }
+}
+let objSearch = '';
+
+function objectButton(def: ObjectDef): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = 'obj' + (def.type === state.objType && (state.tool === 'stamp' || state.tool === 'scatter') ? ' active' : '');
+  b.title = def.name;
+  b.setAttribute('aria-label', def.name);
+  const img = document.createElement('img');
+  img.src = objectIcon(def);
+  img.style.width = '100%';
+  img.alt = '';
+  b.appendChild(img);
+  b.onclick = () => {
+    state.objType = def.type;
+    state.objColor = null;
+    state.stampRot = 0;
+    setTool(state.tool === 'scatter' && def.natural ? 'scatter' : 'stamp');
+  };
+  return b;
+}
+
 function renderObjectPalette() {
   const el = $('objectPalette');
-  el.innerHTML = '';
+  let search = el.querySelector<HTMLInputElement>('.obj-search');
+  if (!search) {
+    el.innerHTML = '';
+    search = document.createElement('input');
+    search.className = 'obj-search';
+    search.type = 'search';
+    search.placeholder = `Search ${OBJECT_DEFS.length} objects…`;
+    search.setAttribute('aria-label', 'Search objects');
+    search.oninput = () => { objSearch = search!.value.trim().toLowerCase(); renderObjectList(); };
+    search.onkeydown = (e) => { if (e.key === 'Escape') { search!.value = ''; objSearch = ''; renderObjectList(); search!.blur(); } };
+    el.appendChild(search);
+    const list = document.createElement('div');
+    list.className = 'obj-list';
+    el.appendChild(list);
+  }
+  renderObjectList();
+}
+
+function renderObjectList() {
+  const list = $('objectPalette').querySelector<HTMLElement>('.obj-list')!;
+  list.innerHTML = '';
+  const q = objSearch;
+  const words = q.split(/\s+/).filter(Boolean);
+  const matches = (d: ObjectDef) => words.every((w) => d.name.toLowerCase().includes(w) || d.category.toLowerCase().includes(w) || d.type.includes(w));
+  let shown = 0;
   for (const cat of OBJECT_CATEGORIES) {
-    const defs = OBJECT_DEFS.filter((d) => d.category === cat && (state.tool !== 'scatter' || d.natural));
+    const defs = OBJECT_DEFS.filter((d) => d.category === cat && (state.tool !== 'scatter' || d.natural) && (!q || matches(d)));
     if (!defs.length) continue;
-    const h = document.createElement('h4');
-    h.textContent = cat;
-    el.appendChild(h);
+    shown += defs.length;
+    const det = document.createElement('details');
+    det.className = 'obj-cat';
+    const open = !!q || openCats.has(cat) || defs.some((d) => d.type === state.objType);
+    det.open = open;
+    const sum = document.createElement('summary');
+    sum.innerHTML = `<span>${cat}</span><span class="count">${defs.length}</span>`;
+    det.appendChild(sum);
     const grid = document.createElement('div');
     grid.className = 'obj-grid';
-    for (const def of defs) {
-      const b = document.createElement('button');
-      b.className = 'obj' + (def.type === state.objType && (state.tool === 'stamp' || state.tool === 'scatter') ? ' active' : '');
-      b.title = def.name;
-      b.setAttribute('aria-label', def.name);
-      const img = document.createElement('img');
-      img.src = objectIcon(def);
-      img.style.width = '100%';
-      img.alt = '';
-      b.appendChild(img);
-      b.onclick = () => {
-        state.objType = def.type;
-        state.objColor = null;
-        state.stampRot = 0;
-        setTool(state.tool === 'scatter' && def.natural ? 'scatter' : 'stamp');
-      };
-      grid.appendChild(b);
-    }
-    el.appendChild(grid);
+    det.appendChild(grid);
+    // Icons are drawn only when a category is first opened.
+    const fill = () => { if (!grid.childElementCount) for (const def of defs) grid.appendChild(objectButton(def)); };
+    if (open) fill();
+    det.addEventListener('toggle', () => {
+      if (det.open) fill();
+      if (!q) { if (det.open) openCats.add(cat); else openCats.delete(cat); saveOpenCats(); }
+    });
+    list.appendChild(det);
+  }
+  if (!shown) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = 'No objects match.';
+    list.appendChild(p);
   }
 }
 

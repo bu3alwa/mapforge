@@ -3,8 +3,9 @@
 import type { MapObject } from './map';
 import { hash2 } from './rng';
 import { shade } from './patterns';
+import { MORE_DEFS, drawMore } from './objects-more';
 
-export const OBJECT_CATEGORIES = ['Nature', 'Dungeon', 'Furniture', 'Kitchen', 'Workshop', 'Town'] as const;
+export const OBJECT_CATEGORIES = ['Nature', 'Dungeon', 'Furniture', 'Kitchen', 'Workshop', 'Town', 'Tavern', 'Inn', 'Lodge', 'Shop', 'Library', 'Market', 'Animals'] as const;
 export type ObjectCategory = (typeof OBJECT_CATEGORIES)[number];
 
 export interface ObjectDef {
@@ -18,6 +19,8 @@ export interface ObjectDef {
   /** Natural objects get random size/rotation when scattered. */
   natural?: boolean;
   colors?: string[];
+  /** Default paint layer: 0 floor, 1 furniture, 2 tabletop items, 3 lights and hanging things, 4 buildings. */
+  layer?: number;
 }
 
 export const ROOF_COLORS = ['#a4553a', '#8e4a34', '#5b6470', '#b89a5a', '#7a5236', '#6b7a4a', '#4f5d6e', '#9b6b45'];
@@ -94,6 +97,7 @@ export const OBJECT_DEFS: ObjectDef[] = [
   { type: 'boat', name: 'Boat', w: 1.4, h: 3, category: 'Town', snap: false },
   { type: 'signpost', name: 'Signpost', w: 1, h: 0.6, category: 'Town', snap: false },
   { type: 'pier', name: 'Pier / boardwalk', w: 2, h: 5, category: 'Town', snap: true },
+  ...MORE_DEFS,
 ];
 
 export const OBJECT_BY_TYPE = new Map(OBJECT_DEFS.map((d) => [d.type, d]));
@@ -854,8 +858,10 @@ export function drawObject(c: Ctx, o: MapObject) {
       break;
     }
     default: {
-      c.fillStyle = '#c0f';
-      c.fillRect(-w / 2, -h / 2, w, h);
+      if (!drawMore(c, o)) {
+        c.fillStyle = '#c0f';
+        c.fillRect(-w / 2, -h / 2, w, h);
+      }
     }
   }
   c.restore();
